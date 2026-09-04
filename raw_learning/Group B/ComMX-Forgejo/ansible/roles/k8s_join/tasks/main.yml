@@ -1,0 +1,138 @@
+---
+# Join control plane ke-2/ke-3 dan semua worker.
+#
+# Perintah join dibangkitkan SAAT INI JUGA dengan delegate ke control plane
+# pertama, bukan diwarisi dari fact play sebelumnya. Dengan begitu
+# `--tags join` bisa dijalankan sendirian, kapan pun, tanpa harus mengulang
+# seluruh playbook.
+
+- name: Cek apakah node ini sudah join
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: Bangkitkan perintah join dari control plane pertama
+  ansible.builtin.command: kubeadm token create --print-join-command
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  run_once: true
+  changed_when: false
+  register: join_command_raw
+
+- name: Bangkitkan certificate key untuk join control plane
+  ansible.builtin.command: kubeadm init phase upload-certs --upload-certs
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  run_once: true
+  changed_when: false
+  register: cert_key_raw
+
+- name: Simpan sebagai fakta
+  ansible.builtin.set_fact:
+    join_command: "{{ join_command_raw.stdout | trim }}"
+    certificate_key: "{{ cert_key_raw.stdout_lines | last | trim }}"
+
+- name: Join control plane tambahan
+  ansible.builtin.command: >-
+    {{ join_command }}
+    --control-plane
+    --certificate-key {{ certificate_key }}
+    --apiserver-advertise-address {{ ansible_host }}
+    --node-name {{ inventory_hostname }}
+  when:
+    - inventory_hostname in groups['control_plane'][1:]
+    - not kubelet_conf.stat.exists
+
+- name: Join worker
+  ansible.builtin.command: "{{ join_command }} --node-name {{ inventory_hostname }}"
+  when:
+    - inventory_hostname in groups['workers']
+    - not kubelet_conf.stat.exists
+
+- name: Salin kubeconfig ke control plane tambahan
+  when:
+    - inventory_hostname in groups['control_plane'][1:]
+  block:
+    - name: Folder .kube
+      ansible.builtin.file:
+        path: "/home/{{ node_user }}/.kube"
+        state: directory
+        owner: "{{ node_user }}"
+        group: "{{ node_user }}"
+        mode: "0755"
+
+    - name: Salin admin.conf
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/{{ node_user }}/.kube/config"
+        remote_src: true
+        owner: "{{ node_user }}"
+        group: "{{ node_user }}"
+        mode: "0600"
+
+# ==========================================================================
+#  BUKTI, bukan sekadar rc 0.
+#
+#  `kubeadm join` yang berhasil hanya membuktikan perintahnya selesai. Node
+#  bisa saja tidak pernah terdaftar (token kedaluwarsa, jam tidak sinkron,
+#  VIP tidak terjangkau dari node itu) dan playbook tetap hijau -- lalu
+#  kegagalannya baru muncul jauh kemudian sebagai pod yang tidak pernah
+#  ter-schedule. Tiga task di bawah menutup celah itu ([[R-02]], B1).
+#
+#  Semuanya `run_once` + delegate ke control plane pertama: yang ditanya adalah
+#  apiserver, bukan node yang sedang dikonfigurasi.
+# ==========================================================================
+- name: Tunggu semua node terdaftar dan Ready
+  kubernetes.core.k8s_info:
+    kind: Node
+    kubeconfig: "{{ kubeconfig }}"
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  run_once: true
+  become: false
+  register: cluster_nodes
+  vars:
+    expected: "{{ (groups['control_plane'] | length) + (groups['workers'] | length) }}"
+  until: >-
+    cluster_nodes.resources | length == (expected | int)
+    and (cluster_nodes.resources
+         | map(attribute='status.conditions') | map('selectattr', 'type', 'equalto', 'Ready')
+         | map('selectattr', 'status', 'equalto', 'True') | map('list') | map('length')
+         | select('equalto', 1) | list | length) == (expected | int)
+  retries: 30
+  delay: 10
+
+- name: Buktikan jumlah dan komposisi node sesuai inventory
+  ansible.builtin.assert:
+    that:
+      - found | sort == (groups['control_plane'] + groups['workers']) | sort
+      - control_planes | length >= 3
+      - workers | length >= 3
+    fail_msg: >-
+      Node yang terdaftar: {{ found }}.
+      Diharapkan: {{ (groups['control_plane'] + groups['workers']) | sort }}.
+      Control plane {{ control_planes | length }} (butuh >=3),
+      worker {{ workers | length }} (butuh >=3).
+    success_msg: >-
+      {{ found | length }} node Ready --
+      {{ control_planes | length }} control plane, {{ workers | length }} worker.
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  run_once: true
+  become: false
+  vars:
+    found: "{{ cluster_nodes.resources | map(attribute='metadata.name') | list }}"
+    control_planes: >-
+      {{ cluster_nodes.resources
+         | selectattr('metadata.labels', 'contains', 'node-role.kubernetes.io/control-plane')
+         | map(attribute='metadata.name') | list }}
+    workers: >-
+      {{ cluster_nodes.resources
+         | rejectattr('metadata.labels', 'contains', 'node-role.kubernetes.io/control-plane')
+         | map(attribute='metadata.name') | list }}
+
+- name: Perintah verifikasi manual untuk dokumentasi
+  ansible.builtin.debug:
+    msg:
+      - "Salin output ini ke TRACE.md sebagai bukti K-5:"
+      - "  kubectl get nodes -o wide"
+      - "  kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers | wc -l   # harus 3"
+      - "K-6 (HA) BELUM terbukti oleh task ini. Itu butuh mematikan satu node"
+      - "dan menunjukkan cluster tetap melayani -- tidak bisa dibaca dari config."
+  run_once: true

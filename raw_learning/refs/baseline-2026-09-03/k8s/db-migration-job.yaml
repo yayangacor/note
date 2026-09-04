@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: commx-db-migration
+  namespace: commx-prod
+  annotations:
+    # Menginstruksikan ArgoCD untuk menjalankan ini SEBELUM melakukan sync ke pod backend utama
+    argocd.argoproj.io/hook: PreSync
+    # Menginstruksikan ArgoCD untuk menghapus job lama sebelum membuat yang baru
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  # Menghapus pod job secara otomatis dari cluster 5 menit setelah sukses agar hemat resource PC sekolah
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 4 # Batas percobaan ulang jika koneksi ke database gagal saat pertama kali up
+  template:
+    metadata:
+      labels:
+        app: commx-db-migration
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: migration
+        # Menggunakan image backend yang sama, tag akan disesuaikan otomatis oleh Kustomize di pipeline
+        image: commx-backend
+        # Perintah menjalankan drizzle migration (sesuaikan dengan script run migration di package.json backend)
+        command: ["npx", "drizzle-kit", "migrate"] 
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: commx-secrets
+              key: DATABASE_URL
+        resources:
+          limits:
+            cpu: "300m"
+            memory: "256Mi"
+          requests:
+            cpu: "150m"
+            memory: "128Mi"

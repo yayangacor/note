@@ -1,0 +1,57 @@
+---
+- name: Membuat Kubeconfig direktori untuk user root di Control Plane
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: '0755'
+
+- name: Menyalin admin.conf ke Kubeconfig user root
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: true
+    mode: '0600'
+
+- name: Menambahkan repositori resmi Helm untuk Addons
+  kubernetes.core.helm_repository:
+    name: "{{ item.name }}"
+    repo_url: "{{ item.url }}"
+  loop:
+    - { name: 'cilium', url: 'https://cilium.io' }
+    - { name: 'longhorn', url: 'https://longhorn.io' }
+    - { name: 'argo', url: 'https://github.io' }
+
+- name: Menjalankan instalasi Cilium CNI via Helm
+  kubernetes.core.helm:
+    name: cilium
+    chart_ref: cilium/cilium
+    release_namespace: kube-system
+    values:
+      kubeProxyReplacement: "true"
+
+- name: Menjalankan instalasi Longhorn CSI via Helm
+  kubernetes.core.helm:
+    name: longhorn
+    chart_ref: longhorn/longhorn
+    release_namespace: longhorn-system
+    create_namespace: true
+
+- name: MENYALAKAN ARGO CD VIA HELM (Pemicu Pertama)
+  kubernetes.core.helm:
+    name: argocd
+    chart_ref: argo/argo-cd
+    release_namespace: argocd
+    create_namespace: true
+    values:
+      server:
+        service:
+          type: ClusterIP # Bisa diubah ke NodePort/LoadBalancer nanti jika dibutuhkan
+
+- name: Menunggu semua Pod Argo CD selesai diunduh dan berjalan (Running)
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: argocd
+  register: argocd_pods
+  until: "argocd_pods.resources | map(attribute='status.phase') | unique | list == ['Running']"
+  retries: 12
+  delay: 10

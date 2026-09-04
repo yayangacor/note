@@ -1,0 +1,108 @@
+---
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd
+    state: present
+    update_cache: true
+
+- name: Folder config containerd
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+
+- name: Cek apakah config containerd sudah ada
+  ansible.builtin.stat:
+    path: /etc/containerd/config.toml
+  register: containerd_config
+
+- name: Generate config default containerd
+  ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+  when: not containerd_config.stat.exists
+  notify: Restart containerd
+
+- name: Aktifkan SystemdCgroup
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  notify: Restart containerd
+
+# -- Trust ke private registry --------------------------------------------
+# Tanpa dua tugas di bawah, SEMUA image dari registry lokal gagal pull dengan
+# pesan x509 atau "server gave HTTP response to HTTPS client" -- gejala yang
+# gampang disalahartikan sebagai salah kredensial.
+- name: Aktifkan config_path untuk certs.d
+  ansible.builtin.lineinfile:
+    path: /etc/containerd/config.toml
+    regexp: '^(\s*)config_path\s*='
+    line: '      config_path = "/etc/containerd/certs.d"'
+    insertafter: '\[plugins\..*registry\]'
+  notify: Restart containerd
+
+- name: Folder certs.d untuk private registry
+  ansible.builtin.file:
+    path: "/etc/containerd/certs.d/{{ registry_host }}"
+    state: directory
+    mode: "0755"
+
+- name: Daftarkan private registry (mode insecure)
+  ansible.builtin.copy:
+    dest: "/etc/containerd/certs.d/{{ registry_host }}/hosts.toml"
+    mode: "0644"
+    content: |
+      server = "http://{{ registry_host }}"
+
+      [host."http://{{ registry_host }}"]
+        capabilities = ["pull", "resolve"]
+  # `skip_verify = true` DIHAPUS 2026-09-04. Ia mengatur verifikasi sertifikat
+  # TLS, sedangkan skema di sini eksplisit `http://` -- containerd tidak
+  # melakukan TLS sama sekali, jadi baris itu no-op. Group A mencatat
+  # `skip_verify` buggy di containerd v2.2.1, dan tidak ada gunanya menyimpan
+  # baris yang tidak berefek tapi bisa memicu bug. Lihat [[G-24]].
+  when: registry_insecure | bool
+  notify: Restart containerd
+
+# Cabang TLS menunjuk ca.crt, jadi file itu HARUS lebih dulu ada. Sebelum
+# 2026-09-04 tidak ada satu pun task yang membuatnya: menyetel
+# registry_insecure: false menghasilkan containerd yang mencari file hantu dan
+# gagal pull dengan pesan yang tidak menyebut file itu. Lihat [[D-22]].
+#
+# URUTAN YANG MENGIKAT: `--tags cicd` WAJIB sudah jalan sebelum `--tags core`,
+# karena sertifikatnya lahir di VM CI/CD. Kalau belum, task ini gagal dengan
+# pesan yang jelas -- itu lebih baik daripada node yang diam-diam tidak percaya.
+- name: Ambil CA registry dari VM CI/CD
+  ansible.builtin.slurp:
+    src: /opt/cicd/certs/domain.crt
+  delegate_to: "{{ groups['cicd'][0] }}"
+  run_once: true
+  register: registry_ca
+  when: not (registry_insecure | bool)
+
+- name: Pasang CA registry di node
+  ansible.builtin.copy:
+    dest: "/etc/containerd/certs.d/{{ registry_host }}/ca.crt"
+    content: "{{ registry_ca.content | b64decode }}"
+    mode: "0644"
+  when: not (registry_insecure | bool)
+  notify: Restart containerd
+
+- name: Daftarkan private registry (mode TLS)
+  ansible.builtin.copy:
+    dest: "/etc/containerd/certs.d/{{ registry_host }}/hosts.toml"
+    mode: "0644"
+    content: |
+      server = "https://{{ registry_host }}"
+
+      [host."https://{{ registry_host }}"]
+        capabilities = ["pull", "resolve"]
+        ca = ["/etc/containerd/certs.d/{{ registry_host }}/ca.crt"]
+  when: not (registry_insecure | bool)
+  notify: Restart containerd
+
+- name: Pastikan containerd jalan
+  ansible.builtin.systemd:
+    name: containerd
+    state: started
+    enabled: true
+    daemon_reload: true

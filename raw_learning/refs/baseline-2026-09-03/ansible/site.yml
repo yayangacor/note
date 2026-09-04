@@ -1,0 +1,33 @@
+---
+- name: Pre-Deployment Security Auditing
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - security
+
+- name: Prepare Container Runtime and Base K8s Infrastructure
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - common
+    - containerd
+    - k8s_base
+
+- name: Initialize Control Plane
+  hosts: control_plane
+  become: true
+  roles:
+    - k8s_control_plane
+
+- name: Join Worker Nodes
+  hosts: workers
+  become: true
+  roles:
+    - k8s_worker
+
+- name: Deploy Kubernetes Native Addons (Cilium, Longhorn, ArgoCD)
+  hosts: control_plane
+  become: true
+  roles:
+    - k8s_addons

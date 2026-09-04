@@ -1,0 +1,39 @@
+# Gateway API, bukan Ingress (D-07). Annotation nginx.ingress.* pada manifest
+# lama tidak pernah dibaca siapa pun di cluster Cilium.
+#
+# Sertifikat dibuat manual sekali:
+#   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+#     -keyout tls.key -out tls.crt \
+#     -subj "/CN=commx.local.com" -addext "subjectAltName=DNS:commx.local.com"
+#   kubectl create secret tls commx-tls-cert --cert=tls.crt --key=tls.key -n commx-prod
+#
+# subjectAltName WAJIB ada -- browser modern mengabaikan CN.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: commx-gateway
+  namespace: commx-prod
+  labels:
+    app: commx
+    owner: group-1
+    app.kubernetes.io/name: commx-gateway
+    app.kubernetes.io/part-of: commx
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: commx-tls-cert
+      allowedRoutes:
+        namespaces:
+          from: Same

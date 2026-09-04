@@ -1,0 +1,8 @@
+---
+- name: Prepare Container Runtime and Base K8s Infrastructure
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - common
+    - containerd
+    - k8s_base

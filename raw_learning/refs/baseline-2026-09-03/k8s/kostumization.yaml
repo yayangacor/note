@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: commx-prod
+
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - postgres.yaml
+  - redis.yaml
+  - db-migration-job.yaml   # <-- TAMBAHKAN BARIS INI
+  - backend.yaml
+  - frontend.yaml
+  - network-policy.yaml
+
+images:
+  - name: commx-backend
+    newName: 192.168.1.197:5000/commx-backend
+    newTag: latest
+  - name: commx-frontend
+    newName: 192.168.1.197:5000/commx-frontend
+    newTag: latest

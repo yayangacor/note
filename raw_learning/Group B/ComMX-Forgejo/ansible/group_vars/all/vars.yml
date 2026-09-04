@@ -1,0 +1,101 @@
+---
+# ==========================================================================
+#  SATU-SATUNYA TEMPAT ANGKA JARINGAN.
+#  Semua role dan template mengambil dari sini.
+#  Saat IP asli dari MikroTik sudah diketahui, ganti di file INI SAJA.
+#
+#  Semua yang ditandai TODO(Q-02) masih placeholder.
+# ==========================================================================
+
+# -- Identitas kelompok (sudah pasti, Q-01 ditutup) ------------------------
+group_number: 1
+group_name: "Group-{{ group_number }}"
+node_user: "ubuntu"
+
+# -- Jaringan node ---------------------------------------------------------
+# TODO(Q-02): sesuaikan dengan hasil cek MikroTik.
+node_subnet_cidr: "192.168.10.0/24"
+node_gateway: "192.168.10.1"
+dns_servers: ["10.22.64.21", "10.22.64.22"]   # dari case, jangan diubah
+
+# -- Endpoint HA -----------------------------------------------------------
+# VIP keepalived. TERTANAM DI SERTIFIKAT saat kubeadm init.
+# Mengubahnya SESUDAH init = reset seluruh cluster. Lihat D-03.
+# TODO(Q-02): satu IP bebas, WAJIB sesubnet dengan cp-01 dan cp-02.
+kube_vip: "192.168.10.100"
+
+# Port frontend HAProxy. WAJIB 8443, bukan 6443 -- kube-apiserver sudah
+# memegang 6443 di host yang sama. Lihat G-01.
+kube_lb_port: 8443
+kube_apiserver_port: 6443
+
+# -- MetalLB ---------------------------------------------------------------
+# TODO(Q-02): WAJIB di luar DHCP pool MikroTik, dan sesubnet dengan node
+# yang diberi label speaker (ARP tidak melewati router). Lihat G-03.
+metallb_pool_start: "192.168.10.200"
+metallb_pool_end: "192.168.10.220"
+
+# -- VM CI/CD (Forgejo + registry, DI LUAR cluster) ------------------------
+# TODO(Q-05): konfirmasi host ini.
+cicd_host_ip: "192.168.1.197"
+forgejo_http_port: 3000
+forgejo_ssh_port: 2222
+registry_port: 5000
+registry_host: "{{ cicd_host_ip }}:{{ registry_port }}"
+# true  = registry HTTP polos (paling cepat berhasil di lab) -- INI DEFAULT KITA
+# false = registry pakai TLS self-signed. Sejak [[D-22]] jalur ini LENGKAP:
+#         sertifikat dibangkitkan role cicd_host, Docker di VM CI/CD dan
+#         containerd di tiap node dibuat mempercayainya secara otomatis.
+#         Sebelumnya menyetel false menghasilkan konfigurasi rusak diam-diam.
+#
+# KALAU MENGGANTI KE false, urutannya mengikat: `--tags cicd` WAJIB jalan lebih
+# dulu daripada `--tags core`, karena sertifikatnya lahir di VM CI/CD dan node
+# menyalinnya dari sana. Node yang sudah terlanjur dikonfigurasi perlu
+# `--tags core` diulang.
+registry_insecure: true
+
+# -- Repo GitOps yang dipantau ArgoCD --------------------------------------
+# Ini rumah TUNGGAL repoURL. `k8s/argocd/application.yaml` hanya cadangan
+# manual dan TIDAK otoritatif -- lihat [[D-16]].
+# TODO(Q-05): sesuaikan owner/nama repo setelah repo dibuat di Forgejo.
+forgejo_repo_owner: "fadmin"
+forgejo_repo_name: "ComMX-Forgejo"
+argocd_app_name: "commx"
+argocd_repo_url: >-
+  http://{{ cicd_host_ip }}:{{ forgejo_http_port }}/{{ forgejo_repo_owner }}/{{ forgejo_repo_name }}.git
+argocd_repo_branch: "main"
+argocd_repo_path: "k8s"
+
+# -- Versi (dikunci supaya hasilnya bisa diulang) --------------------------
+kubernetes_version: "1.30"
+cilium_version: "1.16.5"
+metallb_version: "0.14.8"
+longhorn_version: "1.7.2"
+gateway_api_version: "v1.2.0"
+metrics_server_version: "3.12.2"
+
+# -- Jaringan cluster ------------------------------------------------------
+pod_cidr: "10.244.0.0/16"
+cilium_replace_kubeproxy: true
+
+# -- Aplikasi --------------------------------------------------------------
+app_namespace: "commx-prod"
+# HURUF KECIL SEMUA, DAN ITU DISENGAJA -- jangan "diperbaiki" balik.
+# case.md baris 46-47 mengejanya `ComMX.local.com` / `Grafana.local.com`. DNS
+# tidak peka huruf, jadi keduanya me-resolve ke nama yang sama dan requirement
+# tetap terpenuhi. Yang peka huruf adalah CORS: browser mengirim header Origin
+# dalam huruf kecil, dan backend membandingkan `SOCKET_ORIGIN` sebagai STRING.
+# Selama nilai ini berkapital, login berhasil tapi chat tidak pernah tersambung
+# -- dan semuanya terlihat sehat. Lihat [[G-22]] dan [[D-21]].
+app_domain: "commx.local.com"
+grafana_domain: "grafana.local.com"
+
+# -- Path ------------------------------------------------------------------
+kubeconfig: "/home/{{ node_user }}/.kube/config"
+# Tempat sertifikat self-signed Gateway disimpan di control plane pertama.
+# Sengaja di luar repo. Hapus isinya kalau mau sertifikat baru dibangkitkan.
+app_tls_dir: "/etc/commx/tls"
+
+# -- SMTP (host dan port saja; kredensial di vault.yml) --------------------
+smtp_host: "smtp.gmail.com"
+smtp_port: 587

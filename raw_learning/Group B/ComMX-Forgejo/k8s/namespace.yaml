@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: commx-prod
+  labels:
+    app: commx
+    owner: group-1
+    app.kubernetes.io/name: commx-prod
+    app.kubernetes.io/part-of: commx
+    environment: production

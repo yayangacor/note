@@ -1,0 +1,59 @@
+# ── Rahasia: TIDAK BOLEH masuk repo (case melarang push .env & kredensial) ──
+# Role `security` akan menggagalkan playbook kalau salah satu ini ter-track.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Secret Kubernetes yang berisi nilai asli (yang di-commit hanya *.example.yaml)
+k8s/config/secret.yaml
+k8s/**/secret.yaml
+!k8s/**/secret.example.yaml
+
+# Ansible vault dalam keadaan terdekripsi + kredensial
+ansible/group_vars/all/vault.yml
+!ansible/group_vars/all/vault.yml.example
+ansible/*.retry
+
+# Terraform: state memuat nilai sensitif dalam bentuk polos
+terraform-commx/.terraform/
+terraform-commx/.terraform.lock.hcl
+terraform-commx/terraform.tfstate
+terraform-commx/terraform.tfstate.*
+terraform-commx/*.tfvars
+!terraform-commx/terraform.tfvars.example
+crash.log
+
+# Kunci & sertifikat
+*.pem
+*.key
+tls.crt
+tls.key
+id_rsa
+id_ed25519
+kubeconfig
+*.kubeconfig
+
+# ── Build artifacts ─────────────────────────────────────────────────────────
+# Hasil `kustomize build` yang dipakai gerbang validate-manifests (D-23).
+# Artefak, bukan sumber -- CI membuatnya ulang tiap run.
+build.yaml
+
+node_modules/
+.next/
+dist/
+build/
+*.log
+
+# ── Devenv / direnv / pre-commit ────────────────────────────────────────────
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+.direnv
+.pre-commit-config.yaml
+
+# ── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

@@ -1,0 +1,40 @@
+! DI-GENERATE ANSIBLE.
+! VIP {{ kube_vip }}
+! VRRP adalah protokol Layer 2: semua node di grup [loadbalancer]
+! WAJIB berada di subnet yang sama (G-02).
+
+global_defs {
+    enable_script_security
+    script_user root
+}
+
+vrrp_script check_haproxy {
+    script "/usr/bin/killall -0 haproxy"
+    interval 2
+    weight 2
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_1 {
+    state {{ keepalived_state }}
+    interface {{ ansible_default_ipv4.interface }}
+    ! Ganti kalau ada kelompok lain memakai VRRP di broadcast domain yang sama --
+    ! virtual_router_id yang kembar membuat dua cluster saling merebut VIP.
+    virtual_router_id 51
+    priority {{ keepalived_priority }}
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass {{ keepalived_pass }}
+    }
+
+    virtual_ipaddress {
+        {{ kube_vip }}
+    }
+
+    track_script {
+        check_haproxy
+    }
+}

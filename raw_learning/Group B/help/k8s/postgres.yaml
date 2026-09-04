@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: commx-prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine # Langsung pakai official image, tidak perlu build
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "commx"
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          value: "kelargacor" # Password sesuai kesepakatan rahasia
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc # Menghubungkan ke harddisk permanen di bawah
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: commx-prod
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi # Alokasi harddisk untuk database
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: commx-prod
+spec:
+  ports:
+  - port: 5432
+  selector:
+    app: postgres

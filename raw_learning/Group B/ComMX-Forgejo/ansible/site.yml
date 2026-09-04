@@ -1,0 +1,131 @@
+---
+# ==========================================================================
+#  JALANKAN BERTAHAP DENGAN --tags, JANGAN SEKALIGUS. Lihat D-10.
+#
+#    ansible-playbook site.yml --tags cicd       --ask-vault-pass
+#    ansible-playbook site.yml --tags core
+#    ansible-playbook site.yml --tags lb         --ask-vault-pass
+#    ansible-playbook site.yml --tags init
+#    ansible-playbook site.yml --tags cni
+#    ansible-playbook site.yml --tags join
+#    ansible-playbook site.yml --tags metallb
+#    ansible-playbook site.yml --tags storage
+#    ansible-playbook site.yml --tags metrics
+#    ansible-playbook site.yml --tags monitoring --ask-vault-pass
+#    ansible-playbook site.yml --tags argocd     --ask-vault-pass
+#    ansible-playbook site.yml --tags kyverno
+#    ansible-playbook site.yml --tags kubectl
+#
+#  Alasan urutannya:
+#    cicd    boleh paling awal -- VM-nya di luar cluster, tidak bergantung apa pun.
+#    lb      SEBELUM init  -- kubeadm init butuh VIP yang sudah hidup (D-03).
+#    cni     SEBELUM join  -- tanpa CNI, node NotReady dan CoreDNS Pending.
+#    kyverno PALING AKHIR  -- policy disallow-latest-tag memblokir instalasi
+#            komponen lain kalau dipasang duluan (G-07).
+#
+#  Add-on memakai pola host `control_plane[0]`: semuanya cukup dijalankan
+#  SEKALI dari satu control plane, bukan tiga kali.
+#
+#  Sesudah TIAP tahap, verifikasi di target -- bukan di layar Ansible (R-02).
+# ==========================================================================
+
+- name: Audit keamanan repo sebelum apa pun dijalankan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always, security]
+  roles:
+    - security
+
+- name: Forgejo + private registry (VM di luar cluster)
+  hosts: cicd
+  become: true
+  tags: [cicd]
+  roles:
+    - cicd_host
+
+- name: Core system semua node cluster
+  hosts: k8s_cluster
+  become: true
+  tags: [core]
+  roles:
+    - common
+    - containerd
+    - k8s_base
+
+- name: Load balancer HAProxy + keepalived
+  hosts: loadbalancer
+  become: true
+  tags: [lb]
+  roles:
+    - load_balancer
+
+- name: Init control plane pertama
+  hosts: control_plane
+  become: true
+  tags: [init, cluster]
+  roles:
+    - k8s_control_plane
+
+- name: CNI Cilium (wajib sebelum node bisa Ready)
+  hosts: control_plane[0]
+  become: true
+  tags: [cni, cluster]
+  roles:
+    - cni
+
+- name: Join control plane sisanya dan semua worker
+  hosts: k8s_cluster
+  become: true
+  tags: [join, cluster]
+  roles:
+    - k8s_join
+
+- name: MetalLB
+  hosts: control_plane[0]
+  become: true
+  tags: [metallb]
+  roles:
+    - metallb
+
+- name: Longhorn (CSI)
+  hosts: control_plane[0]
+  become: true
+  tags: [storage]
+  roles:
+    - storage
+
+- name: metrics-server (sumber metrik HPA)
+  hosts: control_plane[0]
+  become: true
+  tags: [metrics]
+  roles:
+    - metrics_server
+
+- name: Monitoring dan alerting
+  hosts: control_plane[0]
+  become: true
+  tags: [monitoring]
+  roles:
+    - monitoring
+
+- name: ArgoCD
+  hosts: control_plane[0]
+  become: true
+  tags: [argocd]
+  roles:
+    - argocd
+
+- name: Kyverno (PALING AKHIR)
+  hosts: control_plane[0]
+  become: true
+  tags: [kyverno]
+  roles:
+    - kyverno
+
+- name: kubectl di mesin operator
+  hosts: operator
+  become: true
+  tags: [kubectl]
+  roles:
+    - kubectl_client

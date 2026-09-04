@@ -1,0 +1,21 @@
+# SALIN jadi terraform.tfvars (sudah di-gitignore) lalu isi seperlunya.
+# Kredensial LEBIH BAIK lewat environment variable, bukan file:
+#   export TF_VAR_proxmox_api_url="https://<ip-proxmox>:8006/"
+#   export TF_VAR_proxmox_api_token_id="Group-1@pve!terraform"
+#   export TF_VAR_proxmox_api_token_secret="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#   export TF_VAR_ssh_public_key="$(cat ~/.ssh/id_ed25519.pub)"
+
+proxmox_node_names = ["pve1", "pve2", "pve3"]
+
+# Verifikasi dengan `qm list` di TIAP node -- template local-lvm tidak shared.
+template_vm_ids = {
+  pve1 = 9000
+  pve2 = 9000
+  pve3 = 9000
+}
+
+# TODO(Q-02): ganti setelah cek MikroTik.
+network_gateway   = "192.168.10.1"
+control_plane_ips = ["192.168.10.11", "192.168.10.12", "192.168.10.13"]
+worker_ips        = ["192.168.10.21", "192.168.10.22", "192.168.10.23"]
+cicd_host_ip      = "192.168.1.197"

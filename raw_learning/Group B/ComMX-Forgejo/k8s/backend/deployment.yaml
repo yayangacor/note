@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: commx-prod
+  labels: &labels
+    app: backend
+    owner: group-1
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: commx
+spec:
+  replicas: 3
+  # RollingUpdate dengan maxUnavailable 0 -- justifikasinya ada di D-12:
+  # aplikasi memegang WebSocket persisten, Recreate memutus semua sesi
+  # sekaligus, dan blue/green butuh kapasitas ganda yang tidak tersedia
+  # di PC 24 GB. State sesi dipegang bersama lewat Redis adapter, jadi klien
+  # yang pindah pod tidak kehilangan room.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backend
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      # "Resource seimbang antar node" tidak terjadi sendiri -- ini yang
+      # memaksa replika tersebar, bukan menumpuk di satu node.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: backend
+      containers:
+        - name: backend
+          # Tag diisi oleh CI lewat `kustomize edit set image`, tidak pernah
+          # `latest` -- Kyverno akan menolaknya (R-03).
+          image: commx-backend
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          # Enam env yang dibaca backend/src. Versi lama hanya menyetel dua (G-11).
+          envFrom:
+            - configMapRef:
+                name: commx-config
+            - secretRef:
+                name: commx-secret
+          readinessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      imagePullSecrets:
+        - name: registry-credentials

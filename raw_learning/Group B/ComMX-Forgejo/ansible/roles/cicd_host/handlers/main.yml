@@ -1,0 +1,10 @@
+---
+- name: Restart docker
+  ansible.builtin.service:
+    name: docker
+    state: restarted
+
+- name: Restart stack cicd
+  ansible.builtin.command: docker compose up -d --force-recreate
+  args:
+    chdir: /opt/cicd

@@ -1,0 +1,18 @@
+proxmox_node_names = ["pve1", "pve2", "pve3"]
+
+template_vm_ids = {
+  pve1 = 100
+  pve2 = 101
+  pve3 = 102
+}
+
+# [PENTING] JANGAN isi token di sini kalau file ini bakal di-commit.
+# Copy jadi terraform.tfvars (sudah di-gitignore) lalu isi baris di bawah,
+# ATAU lebih aman lagi pakai environment variable:
+#   export TF_VAR_proxmox_api_url="https://<ip-proxmox>:8006/"
+#   export TF_VAR_proxmox_api_token_id="group-x@pve!terraform"
+#   export TF_VAR_proxmox_api_token_secret="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#
+# proxmox_api_url          = "https://<ip-proxmox>:8006/"
+# proxmox_api_token_id     = "group-x@pve!terraform"
+# proxmox_api_token_secret = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"

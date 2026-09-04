@@ -1,0 +1,11 @@
+---
+- name: Run Gitleaks scan on current repository
+  ansible.builtin.command: gitleaks detect --source . --verbose
+  register: gitleaks_result
+  failed_when: gitleaks_result.rc != 0 and gitleaks_result.rc != 1
+  changed_when: false
+
+- name: Run Trivy scan on codebase
+  ansible.builtin.command: trivy fs . --severity HIGH,CRITICAL
+  register: trivy_result
+  changed_when: false

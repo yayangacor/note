@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: commx-backend
+  namespace: commx-prod
+spec:
+  replicas: 3 # High Availability (HA) minimal 3 replika sesuai jumlah worker node
+  selector:
+    matchLabels:
+      app: commx-backend
+  template:
+    metadata:
+      labels:
+        app: commx-backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: backend
+        image: commx-backend # Diubah otomatis oleh Kustomize
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: commx-secrets
+              key: REDIS_URL
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: commx-secrets
+              key: JWT_SECRET
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: commx-prod
+spec:
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http
+  selector:
+    app: commx-backend

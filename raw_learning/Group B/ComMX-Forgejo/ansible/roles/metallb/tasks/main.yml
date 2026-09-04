@@ -1,0 +1,58 @@
+---
+# MetalLB mode Layer 2.
+#
+# Speaker DIBATASI ke node yang sesubnet dengan pool. Alasannya keras:
+# MetalLB L2 mengumumkan lewat ARP, dan ARP tidak melewati router. Node di
+# subnet lain akan mengumumkan IP yang tidak pernah bisa dijangkau (G-03).
+
+- name: Beri label speaker ke node yang sesubnet dengan pool
+  kubernetes.core.k8s:
+    kind: Node
+    name: "{{ item }}"
+    kubeconfig: "{{ kubeconfig }}"
+    state: patched
+    definition:
+      metadata:
+        labels:
+          metallb-speaker: "true"
+  loop: "{{ groups['speaker'] }}"
+  become: false
+
+- name: Tambah helm repo metallb
+  kubernetes.core.helm_repository:
+    name: metallb
+    repo_url: https://metallb.github.io/metallb
+  become: false
+
+- name: Install MetalLB
+  kubernetes.core.helm:
+    name: metallb
+    chart_ref: metallb/metallb
+    chart_version: "{{ metallb_version }}"
+    release_namespace: metallb-system
+    create_namespace: true
+    kubeconfig: "{{ kubeconfig }}"
+    wait: true
+    timeout: 10m
+  become: false
+
+- name: Tunggu webhook MetalLB siap
+  # Apply CR sebelum controller Available akan ditolak webhook.
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: metallb-controller
+    namespace: metallb-system
+    kubeconfig: "{{ kubeconfig }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
+  become: false
+
+- name: Konfigurasi IPAddressPool dan L2Advertisement
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    template: pool.yaml.j2
+  become: false

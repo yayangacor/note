@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: commx-frontend
+  namespace: commx-prod
+spec:
+  replicas: 3 # High Availability (HA)
+  selector:
+    matchLabels:
+      app: commx-frontend
+  template:
+    metadata:
+      labels:
+        app: commx-frontend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+      - name: frontend
+        image: commx-frontend # Diubah otomatis oleh Kustomize
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: NEXT_PUBLIC_API_URL
+          value: "https://local.com" # Routing ke backend via Ingress HTTPS
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: commx-prod
+spec:
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http
+  selector:
+    app: commx-frontend
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: commx-ingress
+  namespace: commx-prod
+  annotations:
+    kubernetes.io/ingress.class: "cilium" # Menggunakan Cilium CNI bawaan
+    nginx.ingress.kubernetes.io/ssl-redirect: "true" # Paksa HTTPS
+    nginx.ingress.kubernetes.io/websocket-services: "backend-service" # Izinkan WebSocket (WSS)
+spec:
+  tls:
+  - hosts:
+    - ://local.com
+    secretName: commx-tls-cert # SSL/TLS certificate untuk HTTPS
+  rules:
+  - host: ://local.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 3000
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 3000

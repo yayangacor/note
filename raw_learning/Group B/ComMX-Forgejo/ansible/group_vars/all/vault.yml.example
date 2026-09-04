@@ -1,0 +1,54 @@
+---
+# SALIN jadi vault.yml lalu ENKRIPSI:
+#   ansible-vault encrypt group_vars/all/vault.yml
+# Jalankan playbook dengan:  --ask-vault-pass
+#
+# vault.yml TIDAK BOLEH di-commit dalam keadaan terdekripsi.
+# Role `security` menggagalkan playbook kalau nilai-nilai ini bocor ke repo.
+
+# Password Grafana -- dari case, jangan diubah
+grafana_password: "monitor"
+
+# Password autentikasi VRRP antar node keepalived (bebas, samakan di 2 node)
+keepalived_pass: "tpanet261"
+
+# Kredensial private registry -- dari case.
+# Nilai aslinya SENGAJA tidak ditulis di sini: file .example ini ter-track git,
+# dan role `security` menggagalkan playbook kalau kredensial case muncul di file
+# yang ter-track. Ambil nilainya dari case.md saat menyalin ke vault.yml.
+registry_username: "Group-1"
+registry_password: "LIHAT_case.md"
+
+# Kredensial ArgoCD untuk membaca repo Forgejo.
+# NILAINYA SENGAJA SAMA dengan secret GIT_TOKEN di Forgejo ([[D-17]]) --
+# satu token, dua tempat simpan (Forgejo Actions Secrets + file ini).
+# SCOPE WAJIB `write:repository`: CI mem-push commit tag, read-only menggagalkannya.
+# Kosongkan kalau repo Forgejo publik. Lihat [[D-16]].
+forgejo_repo_user: "ci-bot"
+forgejo_repo_token: "GANTI_INI"
+
+# Postgres
+postgres_user: "commx"
+postgres_password: "GANTI_INI"
+postgres_db: "commx"
+
+# JWT backend -- bangkitkan dengan: openssl rand -base64 32
+jwt_secret: "GANTI_INI"
+
+# Redis
+redis_password: "GANTI_INI"
+
+# SMTP.
+# smtp_password WAJIB Gmail App Password 16 karakter, BUKAN password akun Google.
+# Cara membuatnya: aktifkan 2FA dulu, lalu Google Account > Security >
+# 2-Step Verification > App passwords.
+# Kalau salah, Alertmanager gagal kirim DIAM-DIAM: alert tetap terlihat Firing
+# di UI Prometheus tapi email tidak pernah sampai.
+smtp_user: "yayan.gacor07@gmail.com"
+smtp_password: "GANTI_DENGAN_APP_PASSWORD"   # TODO(Q-04)
+smtp_from: "yayan.gacor07@gmail.com"
+
+# Case meminta alert dikirim ke email SETIAP anggota.
+# TODO(Q-04): tambahkan alamat anggota lain sebelum penilaian.
+team_emails:
+  - yayan.gacor07@gmail.com

@@ -1,0 +1,66 @@
+name: Continuous Integration (CI) Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  security-scan:
+    name: Code & Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run Trivy Vulnerability Scan
+        run: /usr/local/bin/trivy fs --severity CRITICAL,HIGH .
+
+  build-and-publish:
+    name: Containerize & Publish via School PC
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Generate Dynamic Version Tag
+        id: vars
+        run: echo "TAG=v${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      - name: Execute Build and Push via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/prk/Desktop/ComMX-Forgejo
+            git remote set-url origin http://fadmin:${{ secrets.GIT_TOKEN }}@192.168.1.197:3000/fadmin/ComMX-Forgejo.git
+            git pull origin main || true
+
+            docker login 192.168.1.197:5000 -u "${{ secrets.REGISTRY_USER }}" -p "${{ secrets.REGISTRY_PASS }}"
+
+            cd backend
+            docker build -t 192.168.1.197:5000/commx-backend:${{ steps.vars.outputs.TAG }} .
+            docker push 192.168.1.197:5000/commx-backend:${{ steps.vars.outputs.TAG }}
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image 192.168.1.197:5000/commx-backend:${{ steps.vars.outputs.TAG }}
+            cd ..
+
+            cd frontend
+            docker build -t 192.168.1.197:5000/commx-frontend:${{ steps.vars.outputs.TAG }} .
+            docker push 192.168.1.197:5000/commx-frontend:${{ steps.vars.outputs.TAG }}
+            cd ..
+
+            sed -i "s/v0.0.0/${{ steps.vars.outputs.TAG }}/g" k8s/backend-development.yaml
+            sed -i "s/v0.0.0/${{ steps.vars.outputs.TAG }}/g" k8s/frontend-development.yaml
+
+            git config --global user.name "Forgejo Actions CI"
+            git config --global user.email "ci@forgejo.local"
+            git add k8s/backend-development.yaml k8s/frontend-development.yaml
+            git commit -m "chore: bump image version to ${{ steps.vars.outputs.TAG }} [skip ci]"
+            git push origin main

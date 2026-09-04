@@ -1,0 +1,70 @@
+# WSS tidak butuh anotasi khusus: upgrade WebSocket lewat listener HTTPS yang
+# sama seperti trafik biasa. Yang menentukan justru NEXT_PUBLIC_SOCKET_URL
+# saat build image (G-04) dan SOCKET_ORIGIN di backend (G-11).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: commx-route
+  namespace: commx-prod
+  labels:
+    app: commx
+    owner: group-1
+    app.kubernetes.io/name: commx-route
+    app.kubernetes.io/part-of: commx
+spec:
+  parentRefs:
+    - name: commx-gateway
+  hostnames:
+    - "commx.local.com"
+  rules:
+    # /api -> backend, prefix dibuang karena NestJS tidak punya global prefix
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: backend
+          port: 3000
+
+    # Socket.IO -> backend, TANPA rewrite (path harus utuh)
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /socket.io
+      backendRefs:
+        - name: backend
+          port: 3000
+
+    # next.config.ts menyetel basePath "/frontend", jadi seluruh halaman dan
+    # aset dilayani di bawah /frontend (G-06). Rute ini yang membuatnya sampai.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /frontend
+      backendRefs:
+        - name: frontend
+          port: 3000
+
+    # Root diarahkan ke /frontend supaya membuka https://commx.local.com/
+    # tidak berakhir 404. Alternatifnya: hapus basePath di next.config.ts,
+    # rebuild image, lalu ganti rule ini jadi PathPrefix "/" -> frontend.
+    - matches:
+        - path:
+            type: Exact
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /frontend
+            statusCode: 302
+      backendRefs:
+        - name: frontend
+          port: 3000

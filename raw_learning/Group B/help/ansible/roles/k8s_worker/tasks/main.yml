@@ -1,0 +1,6 @@
+---
+- name: Join worker node to the cluster
+  ansible.builtin.command: "{{ hostvars['localhost']['kubernetes_join_command'] }}"
+  register: worker_join
+  failed_when: worker_join.rc != 0 and 'already exists' not in worker_join.stderr
+  changed_when: "'This node has joined the cluster' in worker_join.stdout"

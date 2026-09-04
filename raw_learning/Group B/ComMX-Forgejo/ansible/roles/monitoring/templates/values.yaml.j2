@@ -1,0 +1,81 @@
+# kube-proxy tidak ada karena digantikan Cilium (D-04). Kalau rule bawaannya
+# tidak dimatikan, akan ada alert palsu yang menyala terus dan menenggelamkan
+# alert asli.
+defaultRules:
+  rules:
+    kubeProxy: false
+
+grafana:
+  adminUser: tormonitor
+  adminPassword: "{{ grafana_password }}"
+  service:
+    type: LoadBalancer
+  persistence:
+    enabled: true
+    storageClassName: longhorn
+    size: 2Gi
+  grafana.ini:
+    server:
+      # Tanpa ini, link di email alert menunjuk IP internal, bukan domain.
+      root_url: "https://{{ grafana_domain }}"
+
+prometheus:
+  service:
+    type: LoadBalancer
+  prometheusSpec:
+    retention: 7d
+    # Tanpa dua baris ini, PrometheusRule buatan sendiri DIABAIKAN diam-diam:
+    # rule terlihat ada di `kubectl get prometheusrule` tapi tidak pernah
+    # muncul di UI Prometheus.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: longhorn
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: longhorn
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+  config:
+    global:
+      smtp_smarthost: "{{ smtp_host }}:{{ smtp_port }}"
+      smtp_from: "{{ smtp_from }}"
+      smtp_auth_username: "{{ smtp_user }}"
+      smtp_auth_password: "{{ smtp_password }}"
+      smtp_require_tls: true
+    route:
+      receiver: email-team
+      group_by: ['alertname', 'severity']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # Watchdog menyala terus-menerus by design. Kalau tidak dibuang,
+        # inbox penuh olehnya dan alert asli tidak terlihat.
+        - receiver: blackhole
+          match:
+            alertname: Watchdog
+    receivers:
+      - name: blackhole
+      - name: email-team
+        email_configs:
+          - to: "{{ team_emails | join(', ') }}"
+            send_resolved: true

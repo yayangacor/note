@@ -1,0 +1,115 @@
+---
+# Cilium -- CNI wajib menurut case.
+#
+# Urutan yang penting: CRD Gateway API dipasang DULU, baru Cilium dinyalakan
+# dengan gatewayAPI.enabled. Kalau dibalik, Cilium tetap naik tapi GatewayClass
+# `cilium` tidak pernah muncul -- dan gejalanya baru terasa jauh kemudian,
+# saat Gateway aplikasi menggantung tanpa alamat.
+
+- name: Pasang CRD Gateway API
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml"
+  become: false
+  ignore_errors: true
+  register: gwapi_crd
+
+- name: Fallback pasang CRD Gateway API lewat kubectl
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig }} apply -f
+    https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml
+  become: false
+  when: gwapi_crd is failed
+  changed_when: true
+
+# standard-install SAJA TIDAK CUKUP untuk Cilium: ia butuh 6 CRD, dan `TLSRoute`
+# hanya ada di channel experimental. Tanpa ini GatewayClass berhenti di
+# `ACCEPTED: Unknown` dan Gateway tidak pernah dapat ADDRESS -- gejala yang
+# gampang disalahartikan sebagai masalah MetalLB. Lihat [[G-20]].
+- name: Pasang CRD Gateway API (experimental -- TLSRoute untuk Cilium)
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/experimental-install.yaml"
+  become: false
+  ignore_errors: true
+  register: gwapi_crd_exp
+
+- name: Fallback pasang CRD experimental lewat kubectl
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig }} apply -f
+    https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/experimental-install.yaml
+  become: false
+  when: gwapi_crd_exp is failed
+  changed_when: true
+
+# R-02: apply sukses bukan bukti. Yang membuktikan adalah CRD-nya benar-benar ada.
+- name: Buktikan TLSRoute CRD terpasang sebelum Cilium dinyalakan
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: tlsroutes.gateway.networking.k8s.io
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: tlsroute_crd
+
+- name: Gagalkan lebih awal kalau TLSRoute tidak ada
+  ansible.builtin.fail:
+    msg: >-
+      CRD tlsroutes.gateway.networking.k8s.io tidak ditemukan sesudah apply
+      experimental-install.yaml versi {{ gateway_api_version }}. Cilium Gateway API
+      akan berhenti di ACCEPTED:Unknown. Periksa apakah versi ini masih menyediakan
+      TLSRoute di channel experimental sebelum melanjutkan. Lihat [[G-20]].
+  when: tlsroute_crd.resources | length == 0
+
+- name: Tambah helm repo cilium
+  kubernetes.core.helm_repository:
+    name: cilium
+    repo_url: https://helm.cilium.io/
+  become: false
+
+- name: Install Cilium
+  kubernetes.core.helm:
+    name: cilium
+    chart_ref: cilium/cilium
+    chart_version: "{{ cilium_version }}"
+    release_namespace: kube-system
+    kubeconfig: "{{ kubeconfig }}"
+    wait: true
+    timeout: 15m
+    values:
+      ipam:
+        mode: kubernetes
+      k8sServiceHost: "{{ kube_vip }}"
+      k8sServicePort: "{{ kube_lb_port }}"
+      kubeProxyReplacement: "{{ cilium_replace_kubeproxy }}"
+      operator:
+        replicas: 2
+      gatewayAPI:
+        enabled: true
+  become: false
+
+- name: Tunggu control plane pertama jadi Ready
+  kubernetes.core.k8s_info:
+    kind: Node
+    name: "{{ inventory_hostname }}"
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: node_info
+  until: >-
+    node_info.resources | length > 0 and
+    (node_info.resources[0].status.conditions
+     | selectattr('type', 'equalto', 'Ready')
+     | selectattr('status', 'equalto', 'True') | list | length) > 0
+  retries: 30
+  delay: 10
+
+- name: Pastikan GatewayClass cilium tersedia
+  kubernetes.core.k8s_info:
+    kind: GatewayClass
+    name: cilium
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: gwclass
+  failed_when: gwclass.resources | length == 0

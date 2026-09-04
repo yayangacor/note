@@ -1,0 +1,49 @@
+---
+# Repo Kubernetes + kubelet/kubeadm/kubectl. Versi dikunci di group_vars.
+
+- name: Folder keyrings
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Unduh signing key Kubernetes
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: "0644"
+
+- name: Pastikan key benar-benar blok PGP yang sah
+  ansible.builtin.command: gpg --show-keys /etc/apt/keyrings/kubernetes-apt-keyring.asc
+  changed_when: false
+
+- name: Konfigurasi repo apt Kubernetes
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /\n"
+    mode: "0644"
+  register: k8s_repo
+
+- name: Refresh cache apt sesudah repo berubah
+  ansible.builtin.apt:
+    update_cache: true
+  when: k8s_repo.changed
+
+- name: Install kubelet, kubeadm, kubectl
+  ansible.builtin.apt:
+    name: [kubelet, kubeadm, kubectl]
+    state: present
+    update_cache: true
+
+- name: Bekukan versi supaya tidak ikut ter-upgrade
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: [kubelet, kubeadm, kubectl]
+
+- name: Library python untuk modul kubernetes.core
+  ansible.builtin.pip:
+    name: [kubernetes, PyYAML]
+    state: present
+    extra_args: --break-system-packages
+  when: inventory_hostname in groups['control_plane']
