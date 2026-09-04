@@ -1,0 +1,53 @@
+---
+# kubectl di mesin operator supaya cluster bisa dikelola tanpa SSH ke node.
+
+- name: Folder keyrings
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Unduh signing key Kubernetes
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: "0644"
+
+- name: Konfigurasi repo apt Kubernetes
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /\n"
+    mode: "0644"
+
+- name: Install kubectl
+  ansible.builtin.apt:
+    name: kubectl
+    state: present
+    update_cache: true
+
+- name: Bekukan versi kubectl
+  ansible.builtin.dpkg_selections:
+    name: kubectl
+    selection: hold
+
+- name: Ambil kubeconfig dari control plane pertama
+  ansible.builtin.slurp:
+    src: "/home/{{ node_user }}/.kube/config"
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  register: remote_kubeconfig
+
+- name: Folder .kube di operator
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Tulis kubeconfig lokal
+  ansible.builtin.copy:
+    content: "{{ remote_kubeconfig.content | b64decode }}"
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"

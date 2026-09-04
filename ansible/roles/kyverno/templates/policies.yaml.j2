@@ -1,0 +1,96 @@
+# Namespace sistem di-exclude: chart pihak ketiga banyak yang memakai tag
+# latest atau tidak punya label wajib, dan policy tanpa exclude akan
+# memblokir instalasi mereka (G-07).
+{% set system_ns = ['kube-system', 'kube-public', 'kube-node-lease', 'kyverno', 'longhorn-system', 'metallb-system', 'monitoring', 'argocd'] %}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-image-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: {{ system_ns | to_json }}
+      validate:
+        message: "Image wajib memakai tag eksplisit."
+        pattern:
+          spec:
+            containers:
+              - image: "*:*"
+
+    - name: validate-image-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: {{ system_ns | to_json }}
+      validate:
+        message: "Tag 'latest' dilarang -- pakai versi eksplisit."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-default-namespace
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: validate-namespace
+      match:
+        any:
+          - resources:
+              kinds: [Pod, Deployment, StatefulSet, Service]
+      validate:
+        message: "Dilarang membuat resource di namespace default."
+        pattern:
+          metadata:
+            namespace: "!default"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-labels
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-required-labels
+      match:
+        any:
+          - resources:
+              kinds: [Pod, Deployment, StatefulSet, Service]
+      exclude:
+        any:
+          - resources:
+              namespaces: {{ system_ns | to_json }}
+          # Cilium meng-generate Service `cilium-gateway-<nama-gateway>` sendiri,
+          # tanpa label wajib. Tanpa exclude ini admission menolaknya dan Gateway
+          # macet tanpa ADDRESS -- terbaca sebagai "Unable to create Service ...
+          # blocked by Kyverno", gampang disangka bug Cilium. Lihat [[G-21]].
+          # Exclude ini SENGAJA berbasis nama, bukan menurunkan jumlah label wajib:
+          # ketiga label tetap diwajibkan untuk semua beban kerja kita.
+          - resources:
+              names: ["cilium-gateway-*"]
+      validate:
+        message: "Label 'app', 'owner', dan 'app.kubernetes.io/name' wajib ada."
+        pattern:
+          metadata:
+            labels:
+              app: "?*"
+              owner: "?*"
+              app.kubernetes.io/name: "?*"

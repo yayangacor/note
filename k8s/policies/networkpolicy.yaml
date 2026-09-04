@@ -1,0 +1,28 @@
+# Hanya backend yang boleh menyentuh Postgres dan Redis.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: commx-database-isolation
+  namespace: commx-prod
+  labels:
+    app: commx
+    owner: group-1
+    app.kubernetes.io/name: commx-database-isolation
+    app.kubernetes.io/part-of: commx
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [postgres, redis]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backend
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379

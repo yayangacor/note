@@ -1,0 +1,53 @@
+---
+# HAProxy + keepalived, menumpang di control plane (D-02).
+# WAJIB jalan dan terverifikasi SEBELUM role k8s_control_plane --
+# kubeadm init akan gagal kalau VIP belum hidup (D-03).
+
+- name: Install haproxy, keepalived, psmisc
+  ansible.builtin.apt:
+    name: [haproxy, keepalived, psmisc]
+    state: present
+    update_cache: true
+
+- name: Izinkan bind ke IP non-lokal
+  # Tanpa ini HAProxy tidak bisa bind ke VIP yang belum dimiliki node ini.
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-keepalived.conf
+    state: present
+    reload: true
+
+- name: Konfigurasi HAProxy
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    mode: "0644"
+    validate: haproxy -c -f %s   # config rusak ditolak sebelum sempat ditulis
+  notify: Restart haproxy
+
+- name: Konfigurasi keepalived
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    mode: "0644"
+  notify: Restart keepalived
+
+- name: Pastikan haproxy dan keepalived jalan
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop: [haproxy, keepalived]
+
+- name: Paksa handler jalan sekarang, jangan tunggu akhir play
+  ansible.builtin.meta: flush_handlers
+
+- name: Verifikasi VIP benar-benar melayani
+  # B1: config tersimpan bukan bukti. Ini menguji jalur yang sebenarnya dipakai.
+  ansible.builtin.wait_for:
+    host: "{{ kube_vip }}"
+    port: "{{ kube_lb_port }}"
+    timeout: 30
+  run_once: true
+  delegate_to: "{{ groups['loadbalancer'][0] }}"

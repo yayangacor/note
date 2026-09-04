@@ -1,0 +1,43 @@
+# NAMA FILE INI WAJIB `kustomization.yaml`. Versi lama bernama
+# `kostumization.yaml` sehingga tidak pernah terbaca kustomize, dan daftar
+# resources-nya menunjuk file yang tidak ada (G-08).
+#
+# Verifikasi SEBELUM apply:  kubectl kustomize k8s/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: commx-prod
+
+resources:
+  - namespace.yaml
+  - config/configmap.yaml
+  - postgres/service.yaml
+  - postgres/statefulset.yaml
+  # Job PreSync: bikin tabel `users`. Drizzle tidak auto-migrate, dan tanpa
+  # tabel ini semua pod sehat tapi login gagal. Lihat [[G-14]].
+  - postgres/migration-job.yaml
+  - redis/service.yaml
+  - redis/statefulset.yaml
+  - backend/service.yaml
+  - backend/deployment.yaml
+  - backend/hpa.yaml
+  - frontend/service.yaml
+  - frontend/deployment.yaml
+  - frontend/hpa.yaml
+  - gateway/gateway.yaml
+  - gateway/httproute.yaml
+  - policies/networkpolicy.yaml
+
+# secret.yaml sengaja TIDAK didaftarkan -- ia tidak di-commit, dan di-apply
+# terpisah sekali di awal (lihat config/secret.example.yaml).
+
+# Tag diperbarui pipeline dengan:
+#   kustomize edit set image commx-backend=<registry>/commx-backend:<tag>
+# JANGAN pernah dikembalikan ke `latest` -- Kyverno menolaknya (R-03).
+images:
+  - name: commx-backend
+    newName: 192.168.1.197:5000/commx-backend
+    newTag: v0.0.0
+  - name: commx-frontend
+    newName: 192.168.1.197:5000/commx-frontend
+    newTag: v0.0.0

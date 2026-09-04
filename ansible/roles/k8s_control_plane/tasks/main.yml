@@ -1,0 +1,81 @@
+---
+# INIT HANYA DI CONTROL PLANE PERTAMA.
+#
+# Versi lama role ini menargetkan ketiga host tanpa guard, sehingga ketiganya
+# meng-init cluster sendiri-sendiri (G-12). Guard di bawah yang mencegahnya.
+#
+# --control-plane-endpoint WAJIB ada sejak init pertama: VIP tertanam di
+# sertifikat cluster, dan mengubahnya sesudah init berarti reset total (D-03).
+
+- name: Cek apakah cluster sudah pernah di-init di node ini
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: kube_admin_conf
+
+- name: Pastikan VIP hidup sebelum init
+  ansible.builtin.wait_for:
+    host: "{{ kube_vip }}"
+    port: "{{ kube_lb_port }}"
+    timeout: 15
+  when:
+    - inventory_hostname == groups['control_plane'][0]
+    - not kube_admin_conf.stat.exists
+  register: vip_check
+  ignore_errors: true
+
+- name: Berhenti kalau VIP belum aktif
+  ansible.builtin.fail:
+    msg: >-
+      VIP {{ kube_vip }}:{{ kube_lb_port }} belum melayani. Jalankan
+      `--tags lb` dulu, lalu buktikan dengan:
+      ping {{ kube_vip }} dan curl -k https://{{ kube_vip }}:{{ kube_lb_port }}/healthz
+  when:
+    - inventory_hostname == groups['control_plane'][0]
+    - not kube_admin_conf.stat.exists
+    - vip_check is failed
+
+- name: kubeadm init di control plane pertama
+  ansible.builtin.command: >-
+    kubeadm init
+    --control-plane-endpoint {{ kube_vip }}:{{ kube_lb_port }}
+    --upload-certs
+    --pod-network-cidr={{ pod_cidr }}
+    --apiserver-advertise-address {{ ansible_host }}
+    --apiserver-bind-port {{ kube_apiserver_port }}
+    --node-name {{ inventory_hostname }}
+    {% if cilium_replace_kubeproxy %}--skip-phases=addon/kube-proxy{% endif %}
+  when:
+    - inventory_hostname == groups['control_plane'][0]
+    - not kube_admin_conf.stat.exists
+  register: kubeadm_init
+  changed_when: kubeadm_init.rc == 0
+
+- name: Siapkan kubeconfig untuk user biasa
+  when: inventory_hostname == groups['control_plane'][0]
+  block:
+    - name: Folder .kube
+      ansible.builtin.file:
+        path: "/home/{{ node_user }}/.kube"
+        state: directory
+        owner: "{{ node_user }}"
+        group: "{{ node_user }}"
+        mode: "0755"
+
+    - name: Salin admin.conf
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/{{ node_user }}/.kube/config"
+        remote_src: true
+        owner: "{{ node_user }}"
+        group: "{{ node_user }}"
+        mode: "0600"
+
+- name: Ingatkan bahwa node NotReady itu normal sebelum CNI
+  ansible.builtin.debug:
+    msg: >-
+      Init selesai. Node akan berstatus NotReady dan CoreDNS Pending sampai
+      role `cni` dijalankan. Itu NORMAL, bukan kegagalan -- jangan didiagnosis
+      ke arah lain. Lanjutkan dengan: ansible-playbook site.yml --tags cni
+  when:
+    - inventory_hostname == groups['control_plane'][0]
+    - kubeadm_init is changed

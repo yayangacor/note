@@ -1,0 +1,144 @@
+---
+# Forgejo + private registry + runner di VM Ubuntu DI LUAR cluster (D-08).
+# Bisa dijalankan paling awal -- tidak menunggu cluster, MetalLB, atau Longhorn.
+
+- name: Install dependency
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, apache2-utils, python3-passlib]
+    state: present
+    update_cache: true
+
+- name: Install Docker Engine
+  ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+  args:
+    creates: /usr/bin/docker
+
+- name: Pastikan Docker jalan
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Tambahkan user ke grup docker
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: true
+
+- name: Buat struktur folder
+  ansible.builtin.file:
+    path: "/opt/cicd/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: ["", "auth"]
+
+- name: Buat htpasswd untuk registry
+  community.general.htpasswd:
+    path: /opt/cicd/auth/htpasswd
+    name: "{{ registry_username }}"
+    password: "{{ registry_password }}"
+    crypt_scheme: bcrypt
+    mode: "0644"
+  no_log: true
+
+# ==========================================================================
+#  Jalur TLS registry (aktif kalau registry_insecure: false).
+#  Ketiga bagian ini WAJIB ada bersamaan, kalau tidak hasilnya lebih buruk
+#  daripada HTTP polos -- registry bicara HTTPS tapi tidak ada yang percaya:
+#    1. sertifikat + registry menyajikannya   <- di sini
+#    2. docker di VM ini percaya              <- di sini
+#    3. containerd tiap node percaya          <- role `containerd`
+#  Lihat [[D-22]].
+# ==========================================================================
+- name: Folder sertifikat registry
+  ansible.builtin.file:
+    path: /opt/cicd/certs
+    state: directory
+    mode: "0755"
+  when: not (registry_insecure | bool)
+
+# SAN WAJIB memakai IP:, bukan DNS:, karena registry dirujuk lewat alamat IP.
+# Sertifikat dengan CN saja ditolak Go sejak lama -- gejalanya
+# `x509: cannot validate certificate for <ip> because it doesn't contain any IP SANs`,
+# yang gampang disalahartikan sebagai cert belum dipercaya.
+# `creates:` menjaga idempoten: cert yang lahir ulang tiap run memaksa semua
+# node dan Docker mempercayainya ulang.
+- name: Bangkitkan sertifikat registry kalau belum ada
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -newkey rsa:4096 -nodes -sha256 -x509 -days 365
+      -keyout /opt/cicd/certs/domain.key
+      -out /opt/cicd/certs/domain.crt
+      -subj "/CN={{ cicd_host_ip }}"
+      -addext "subjectAltName=IP:{{ cicd_host_ip }}"
+    creates: /opt/cicd/certs/domain.crt
+  when: not (registry_insecure | bool)
+  notify: Restart stack cicd
+
+# `docker push` dari VM ini juga harus percaya. Docker mencari CA di path
+# yang berbeda dari containerd -- /etc/docker/certs.d, bukan /etc/containerd/certs.d.
+- name: Folder trust Docker untuk registry
+  ansible.builtin.file:
+    path: "/etc/docker/certs.d/{{ registry_host }}"
+    state: directory
+    mode: "0755"
+  when: not (registry_insecure | bool)
+
+- name: Docker percaya CA registry
+  ansible.builtin.copy:
+    src: /opt/cicd/certs/domain.crt
+    dest: "/etc/docker/certs.d/{{ registry_host }}/ca.crt"
+    remote_src: true
+    mode: "0644"
+  when: not (registry_insecure | bool)
+  notify: Restart docker
+
+- name: Daftarkan registry sebagai insecure di daemon Docker
+  # Perlu supaya `docker push` dari VM ini berhasil. Node cluster diurus
+  # terpisah lewat containerd certs.d di role `containerd`.
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: |
+      {
+        "insecure-registries": ["{{ registry_host }}"]
+      }
+  when: registry_insecure | bool
+  notify: Restart docker
+
+- name: Tulis docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/cicd/docker-compose.yml
+    mode: "0644"
+  notify: Restart stack cicd
+
+- name: Jalankan stack
+  ansible.builtin.command: docker compose up -d
+  args:
+    chdir: /opt/cicd
+  register: compose_up
+  changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr"
+
+- name: Tunggu Forgejo melayani
+  ansible.builtin.wait_for:
+    port: "{{ forgejo_http_port }}"
+    timeout: 180
+
+- name: Tunggu registry melayani
+  ansible.builtin.wait_for:
+    port: "{{ registry_port }}"
+    timeout: 60
+
+- name: Langkah manual yang tersisa
+  ansible.builtin.debug:
+    msg:
+      - "Forgejo  : http://{{ cicd_host_ip }}:{{ forgejo_http_port }}"
+      - "Registry : {{ registry_host }} (user {{ registry_username }})"
+      - "1. Selesaikan wizard instalasi Forgejo lewat browser."
+      - "2. Buat repo, push kode, buat branch dev dan main."
+      - "3. Ambil token runner di Site Administration > Actions > Runners, lalu:"
+      - "   cd /opt/cicd && docker compose run --rm runner forgejo-runner register \\"
+      - "     --instance http://{{ cicd_host_ip }}:{{ forgejo_http_port }} --token <TOKEN> \\"
+      - "     --name docker-runner --labels ubuntu-latest:docker://node:20-bookworm --no-interactive"
+      - "4. Buktikan registry hidup: docker login {{ registry_host }} -u {{ registry_username }}"

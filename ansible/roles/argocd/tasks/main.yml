@@ -1,0 +1,311 @@
+---
+# ArgoCD WAJIB di DALAM cluster -- dia agen yang menyinkronkan state.
+# Forgejo dan registry ada di luar cluster (role cicd_host, D-08).
+
+- name: Buat namespace aplikasi
+  kubernetes.core.k8s:
+    name: "{{ app_namespace }}"
+    kind: Namespace
+    api_version: v1
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    definition:
+      metadata:
+        labels:
+          app.kubernetes.io/name: "{{ app_namespace }}"
+          app.kubernetes.io/part-of: commx
+  become: false
+
+- name: Buat imagePullSecret untuk private registry
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: registry-credentials
+        namespace: "{{ app_namespace }}"
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: "{{ docker_config | to_json | b64encode }}"
+  vars:
+    docker_config:
+      auths:
+        "{{ registry_host }}":
+          username: "{{ registry_username }}"
+          password: "{{ registry_password }}"
+          auth: "{{ (registry_username + ':' + registry_password) | b64encode }}"
+  become: false
+  no_log: true
+
+# ==========================================================================
+#  Secret aplikasi. Sebelum ini ia langkah manual (`kubectl apply -f
+#  k8s/config/secret.yaml`), dan kalau terlewat backend mati saat import --
+#  bukan degradasi, lihat [[G-16]]. Nilainya diambil dari vault, jadi tidak
+#  ada rahasia yang pernah menyentuh repo. Lihat [[D-18]].
+# ==========================================================================
+- name: Buat Secret aplikasi commx-secret
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: commx-secret
+        namespace: "{{ app_namespace }}"
+        # Ketiga label ini WAJIB -- Kyverno require-labels menolak tanpa mereka.
+        labels:
+          app: commx
+          owner: "{{ group_name | lower }}"
+          app.kubernetes.io/name: commx-secret
+          app.kubernetes.io/part-of: commx
+      type: Opaque
+      stringData:
+        POSTGRES_USER: "{{ postgres_user }}"
+        POSTGRES_PASSWORD: "{{ postgres_password }}"
+        POSTGRES_DB: "{{ postgres_db }}"
+        DATABASE_URL: "postgresql://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/{{ postgres_db }}"
+        JWT_SECRET: "{{ jwt_secret }}"
+        REDIS_URL: "redis://:{{ redis_password }}@redis:6379"
+        REDIS_PASSWORD: "{{ redis_password }}"
+        # [[G-22]] ditutup 2026-09-04: `app_domain` sekarang huruf kecil semua di
+        # vars.yml, jadi nilai ini cocok dengan header Origin yang dikirim browser.
+        # CORS membandingkan sebagai STRING dan peka huruf -- kalau suatu saat
+        # app_domain dikembalikan berkapital, chat gagal konek lagi tanpa gejala
+        # yang menunjuk ke sini. Lihat [[D-21]].
+        SOCKET_ORIGIN: "https://{{ app_domain }}"
+        PORT: "3000"
+        NODE_ENV: "production"
+  become: false
+  no_log: true
+
+# ==========================================================================
+#  Sertifikat TLS Gateway. Tanpa Secret ini Gateway berhenti di
+#  `Invalid CertificateRef` dan tidak pernah dapat ADDRESS.
+#  Self-signed: cukup untuk lab, dan tiap PC klien perlu mempercayainya sekali.
+# ==========================================================================
+- name: Siapkan folder sertifikat
+  ansible.builtin.file:
+    path: "{{ app_tls_dir }}"
+    state: directory
+    mode: "0700"
+
+# `creates:` yang membuat langkah ini idempoten -- case mewajibkannya (A-7).
+# Tanpa itu tiap run melahirkan sertifikat baru dan browser klien harus
+# mempercayainya ulang setiap kali.
+- name: Bangkitkan sertifikat self-signed kalau belum ada
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -nodes -days 365 -newkey rsa:2048
+      -keyout {{ app_tls_dir }}/tls.key
+      -out {{ app_tls_dir }}/tls.crt
+      -subj "/CN={{ app_domain }}"
+      -addext "subjectAltName={{ san_list }}"
+    creates: "{{ app_tls_dir }}/tls.crt"
+  vars:
+    # Sejak [[D-21]] app_domain sudah huruf kecil, jadi `| lower` di bawah
+    # menghasilkan entri yang sama dan `unique` melipatnya jadi dua DNS saja.
+    # Keduanya sengaja dipertahankan sebagai pertahanan: kalau suatu saat ada
+    # yang mengembalikan kapital ke vars.yml, sertifikatnya tetap sah untuk
+    # dua-duanya dan yang gagal tinggal CORS -- satu kegagalan, bukan dua.
+    san_list: >-
+      {{ [app_domain, app_domain | lower, grafana_domain, grafana_domain | lower]
+         | unique | map('regex_replace', '^', 'DNS:') | join(',') }}
+
+- name: Baca sertifikat dan kunci
+  ansible.builtin.slurp:
+    src: "{{ app_tls_dir }}/{{ item }}"
+  loop: [tls.crt, tls.key]
+  register: tls_files
+
+- name: Buat Secret TLS commx-tls-cert
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: commx-tls-cert
+        namespace: "{{ app_namespace }}"
+        labels:
+          app: commx
+          owner: "{{ group_name | lower }}"
+          app.kubernetes.io/name: commx-tls-cert
+          app.kubernetes.io/part-of: commx
+      type: kubernetes.io/tls
+      data:
+        tls.crt: "{{ tls_files.results[0].content }}"
+        tls.key: "{{ tls_files.results[1].content }}"
+  become: false
+  no_log: true
+
+# B2: baca ulang, jangan percaya "changed/ok".
+- name: Buktikan kedua Secret benar-benar ada di namespace aplikasi
+  kubernetes.core.k8s_info:
+    kind: Secret
+    namespace: "{{ app_namespace }}"
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: ns_secrets
+
+- name: Assert Secret aplikasi, TLS, dan registry lengkap
+  ansible.builtin.assert:
+    that:
+      - "'commx-secret' in found"
+      - "'commx-tls-cert' in found"
+      - "'registry-credentials' in found"
+    fail_msg: >-
+      Secret yang ada di {{ app_namespace }}: {{ found }}.
+      Yang kurang membuat backend CrashLoop ([[G-16]]) atau Gateway
+      Invalid CertificateRef.
+    success_msg: "commx-secret, commx-tls-cert, registry-credentials siap di {{ app_namespace }}."
+  vars:
+    found: "{{ ns_secrets.resources | map(attribute='metadata.name') | list }}"
+
+- name: Tambah helm repo argo
+  kubernetes.core.helm_repository:
+    name: argo
+    repo_url: https://argoproj.github.io/argo-helm
+  become: false
+
+- name: Install ArgoCD
+  kubernetes.core.helm:
+    name: argocd
+    chart_ref: argo/argo-cd
+    release_namespace: argocd
+    create_namespace: true
+    kubeconfig: "{{ kubeconfig }}"
+    wait: true
+    timeout: 15m
+    values:
+      server:
+        service:
+          type: LoadBalancer
+      configs:
+        params:
+          server.insecure: true
+  become: false
+
+- name: Ambil password admin awal ArgoCD
+  kubernetes.core.k8s_info:
+    kind: Secret
+    name: argocd-initial-admin-secret
+    namespace: argocd
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: argo_secret
+
+- name: Info login ArgoCD
+  ansible.builtin.debug:
+    msg: >-
+      ArgoCD admin / {{ argo_secret.resources[0].data.password | b64decode }}
+      -- ganti password ini sesudah login pertama.
+  when: argo_secret.resources | length > 0
+
+# ==========================================================================
+#  GitOps baru benar-benar hidup setelah Application ter-apply. Tanpa bagian
+#  di bawah, ArgoCD berdiri tapi tidak tahu harus men-deploy apa: UI hijau,
+#  cluster kosong, dan DoD "push -> berubah sendiri" tidak pernah tercapai.
+#  Lihat [[D-16]].
+# ==========================================================================
+
+# Repo privat: ArgoCD butuh kredensial repo, bukan cuma URL. Kalau token
+# kosong, kita TIDAK diam -- ketiadaan Secret ini muncul di ArgoCD sebagai
+# ComparisonError yang tidak menyebut autentikasi dengan jelas.
+- name: Daftarkan kredensial repo Forgejo ke ArgoCD
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: repo-forgejo-commx
+        namespace: argocd
+        labels:
+          argocd.argoproj.io/secret-type: repository
+      stringData:
+        type: git
+        url: "{{ argocd_repo_url }}"
+        username: "{{ forgejo_repo_user }}"
+        password: "{{ forgejo_repo_token }}"
+  become: false
+  no_log: true
+  when: forgejo_repo_token | default('') | length > 0
+
+- name: Peringatkan kalau kredensial repo tidak dipasang
+  ansible.builtin.debug:
+    msg: >-
+      forgejo_repo_token kosong, jadi Secret repo TIDAK dibuat. Ini hanya benar
+      kalau repo {{ argocd_repo_url }} publik. Kalau repo privat, Application
+      akan berhenti di ComparisonError dan pesannya tidak menyebut autentikasi
+      dengan jelas -- isi forgejo_repo_user/forgejo_repo_token di vault.yml.
+  when: forgejo_repo_token | default('') | length == 0
+
+- name: Apply ArgoCD Application (sumber kebenaran GitOps)
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    definition:
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: "{{ argocd_app_name }}"
+        namespace: argocd
+      spec:
+        project: default
+        source:
+          repoURL: "{{ argocd_repo_url }}"
+          targetRevision: "{{ argocd_repo_branch }}"
+          path: "{{ argocd_repo_path }}"
+        destination:
+          server: https://kubernetes.default.svc
+          # WAJIB sama dengan `namespace:` di k8s/kustomization.yaml.
+          # Kalau beda, sync gagal tanpa sebab yang jelas.
+          namespace: "{{ app_namespace }}"
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+          syncOptions:
+            - CreateNamespace=true
+  become: false
+
+# B2: perintah diterima != perintah tersimpan. Baca ulang dari apiserver.
+- name: Baca ulang Application dari apiserver
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: "{{ argocd_app_name }}"
+    namespace: argocd
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: argo_app
+
+- name: Buktikan Application tersimpan dengan nilai yang benar
+  ansible.builtin.assert:
+    that:
+      - argo_app.resources | length == 1
+      - argo_app.resources[0].spec.source.repoURL == argocd_repo_url
+      - argo_app.resources[0].spec.destination.namespace == app_namespace
+      - argo_app.resources[0].spec.syncPolicy.automated.selfHeal | bool
+    fail_msg: >-
+      Application {{ argocd_app_name }} tidak tersimpan seperti yang dikirim.
+      Yang terbaca: {{ argo_app.resources | map(attribute='spec') | list }}
+    success_msg: >-
+      Application {{ argocd_app_name }} -> {{ argocd_repo_url }}
+      ({{ argocd_repo_branch }}/{{ argocd_repo_path }}) ke namespace {{ app_namespace }},
+      selfHeal aktif.
+
+# Application tersimpan BUKAN berarti sinkronisasi berhasil (B1). Sync butuh
+# repo yang benar-benar bisa di-fetch, dan itu baru ada setelah kode di-push
+# ke Forgejo -- jadi status di sini sengaja hanya dilaporkan, tidak di-assert.
+- name: Laporkan status sync (informatif, bukan gerbang)
+  ansible.builtin.debug:
+    msg: >-
+      sync={{ argo_app.resources[0].status.sync.status | default('belum ada') }}
+      health={{ argo_app.resources[0].status.health.status | default('belum ada') }}
+      -- kalau ComparisonError, cek dulu repo bisa di-clone manual dari node ini.

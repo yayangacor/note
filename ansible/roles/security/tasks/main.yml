@@ -1,0 +1,60 @@
+---
+- name: Resolve repository root
+  ansible.builtin.set_fact:
+    repo_root: "{{ playbook_dir | dirname }}"
+
+- name: List files tracked by git
+  ansible.builtin.command:
+    cmd: git ls-files
+    chdir: "{{ repo_root }}"
+  register: tracked_files
+  changed_when: false
+
+- name: Assert no secret-bearing files are tracked
+  ansible.builtin.assert:
+    that:
+      - tracked_files.stdout_lines | select('search', '(^|/)\.env') | list | length == 0
+      - tracked_files.stdout_lines | select('search', '\.tfstate') | list | length == 0
+      - tracked_files.stdout_lines | select('search', '\.tfvars$') | list | length == 0
+      - tracked_files.stdout_lines | select('search', 'id_(rsa|ed25519)$') | list | length == 0
+    fail_msg: >
+      Secret-bearing files are tracked by git. Remove them from the index,
+      add them to .gitignore, and rotate the exposed credentials.
+    success_msg: "No env, state, tfvars or private key files are tracked."
+
+# Pathspec exclude WAJIB: file ini sendiri memuat daftar polanya, jadi tanpa
+# pengecualian `git grep` selalu menemukan dirinya sendiri dan role ini
+# menggagalkan playbook 100% dari waktu -- termasuk `--tags cicd`, karena play
+# security bertag `always`. Diukur 2026-09-04, lihat [[G-18]].
+- name: Search repository for forbidden strings
+  ansible.builtin.command:
+    cmd: >-
+      git grep -n -I
+      -e baltocdn.com -e tpanetkelar -e kelargacor -e tpanetgampang -e duaenamsatu
+      -- . ':(exclude)ansible/roles/security/tasks/main.yml'
+    chdir: "{{ repo_root }}"
+  register: forbidden
+  failed_when: false
+  changed_when: false
+
+- name: Fail when forbidden strings are present
+  ansible.builtin.assert:
+    that:
+      - forbidden.rc != 0
+    fail_msg: |
+      Hardcoded credentials or decommissioned endpoints found:
+      {{ forbidden.stdout }}
+    success_msg: "No hardcoded credentials or decommissioned endpoints found."
+
+- name: Stat Terraform state file
+  ansible.builtin.stat:
+    path: "{{ repo_root }}/terraform-commx/terraform.tfstate"
+  register: tfstate
+
+- name: Assert Terraform state is not world readable
+  ansible.builtin.assert:
+    that:
+      - tfstate.stat.mode is match('0[0-7]00')
+    fail_msg: "terraform.tfstate mode is {{ tfstate.stat.mode }}, expected 0600."
+    success_msg: "Terraform state permissions are restrictive."
+  when: tfstate.stat.exists

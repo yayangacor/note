@@ -1,0 +1,37 @@
+# DI-GENERATE ANSIBLE -- jangan diedit langsung di server.
+global
+    log /dev/log local0
+    maxconn 4096
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+    retries 3
+
+# Frontend di {{ kube_lb_port }}, BUKAN {{ kube_apiserver_port }}.
+# Port {{ kube_apiserver_port }} sudah dipakai kube-apiserver di host ini (G-01).
+frontend kube_apiserver
+    bind *:{{ kube_lb_port }}
+    default_backend kube_apiserver_backend
+
+backend kube_apiserver_backend
+    option tcp-check
+    balance roundrobin
+{% for host in groups['control_plane'] %}
+    server {{ host }} {{ hostvars[host]['ansible_host'] }}:{{ kube_apiserver_port }} check fall 3 rise 2
+{% endfor %}
+
+# Statistik: http://<node>:8404/stats -- berguna untuk membuktikan backend mana
+# yang sedang UP saat demo failover.
+listen stats
+    bind *:8404
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 10s

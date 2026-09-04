@@ -1,0 +1,61 @@
+# DI-GENERATE ANSIBLE -- jangan diedit langsung di server.
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:9.0.3
+    container_name: forgejo
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__actions__ENABLED=true
+      - FORGEJO__server__ROOT_URL=http://{{ cicd_host_ip }}:{{ forgejo_http_port }}/
+    volumes:
+      - forgejo_data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "{{ forgejo_http_port }}:3000"
+      - "{{ forgejo_ssh_port }}:22"
+
+  registry:
+    image: registry:2.8.3
+    container_name: registry
+    restart: unless-stopped
+    environment:
+      - REGISTRY_AUTH=htpasswd
+      - REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm
+      - REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd
+      - REGISTRY_STORAGE_DELETE_ENABLED=true
+{% if not (registry_insecure | bool) %}
+      # TLS aktif. Sertifikatnya dibangkitkan role cicd_host, dan CA-nya
+      # dipercaya oleh Docker di VM ini + containerd di tiap node. Ketiganya
+      # harus sejalan -- lihat [[D-22]].
+      - REGISTRY_HTTP_TLS_CERTIFICATE=/certs/domain.crt
+      - REGISTRY_HTTP_TLS_KEY=/certs/domain.key
+{% endif %}
+    volumes:
+      - registry_data:/var/lib/registry
+      - ./auth:/auth:ro
+{% if not (registry_insecure | bool) %}
+      - ./certs:/certs:ro
+{% endif %}
+    ports:
+      - "{{ registry_port }}:5000"
+
+  runner:
+    image: code.forgejo.org/forgejo/runner:6.3.1
+    container_name: forgejo-runner
+    restart: unless-stopped
+    depends_on:
+      - forgejo
+    volumes:
+      - runner_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Registrasi runner butuh token dari UI Forgejo -- langkah manual sekali,
+    # perintahnya dicetak di akhir role ini.
+    command: ["forgejo-runner", "daemon"]
+
+volumes:
+  forgejo_data:
+  registry_data:
+  runner_data:

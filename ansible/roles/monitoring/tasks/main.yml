@@ -1,0 +1,46 @@
+---
+# kube-prometheus-stack: Prometheus + Grafana + Alertmanager.
+# Butuh MetalLB (Service LoadBalancer) dan Longhorn (PVC) lebih dulu.
+
+- name: Tambah helm repo prometheus-community
+  kubernetes.core.helm_repository:
+    name: prometheus-community
+    repo_url: https://prometheus-community.github.io/helm-charts
+  become: false
+
+- name: Install kube-prometheus-stack
+  kubernetes.core.helm:
+    name: monitoring
+    chart_ref: prometheus-community/kube-prometheus-stack
+    release_namespace: monitoring
+    create_namespace: true
+    kubeconfig: "{{ kubeconfig }}"
+    wait: true
+    timeout: 20m
+    values: "{{ lookup('template', 'values.yaml.j2') | from_yaml }}"
+  become: false
+
+- name: Apply alert rules
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ kubeconfig }}"
+    template: alert-rules.yaml.j2
+  become: false
+
+- name: Ambil IP LoadBalancer Grafana dan Prometheus
+  kubernetes.core.k8s_info:
+    kind: Service
+    namespace: monitoring
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: mon_svc
+
+- name: IP yang harus didaftarkan ke DNS MikroTik
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.metadata.name }} ->
+      {{ item.status.loadBalancer.ingress[0].ip | default('pending') }}
+  loop: "{{ mon_svc.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when: item.spec.type == "LoadBalancer"

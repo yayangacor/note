@@ -1,0 +1,76 @@
+---
+# metrics-server -- sumber metrik CPU/RAM untuk HPA.
+#
+# Kenapa ini role sendiri dan bukan bagian monitoring: Prometheus TIDAK memberi
+# makan HPA. HPA membaca metrics.k8s.io, dan yang menyediakannya cuma
+# metrics-server. Tanpa role ini `kubectl get hpa` menampilkan TARGETS
+# `<unknown>/70%` selamanya dan workload tidak pernah scale -- padahal
+# auto-scale adalah requirement (K-7). Gejalanya diam: HPA tetap ada, tetap
+# terlihat sehat, cuma tidak pernah bertindak.
+
+- name: Tambah helm repo metrics-server
+  kubernetes.core.helm_repository:
+    name: metrics-server
+    repo_url: https://kubernetes-sigs.github.io/metrics-server/
+  become: false
+
+# `--kubelet-insecure-tls` WAJIB di cluster kubeadm biasa. Sertifikat kubelet
+# ditandatangani CA cluster dan tidak memuat IP node sebagai SAN, jadi
+# metrics-server menolaknya dengan `x509: cannot validate certificate`.
+# Gejalanya menipu: pod metrics-server Running dan Ready, tapi APIService
+# metrics.k8s.io tetap False dan HPA tetap <unknown>.
+# Ini keamanan yang sengaja diturunkan untuk lab; di produksi yang benar adalah
+# menerbitkan sertifikat kubelet dengan SAN yang tepat.
+- name: Install metrics-server
+  kubernetes.core.helm:
+    name: metrics-server
+    chart_ref: metrics-server/metrics-server
+    chart_version: "{{ metrics_server_version }}"
+    release_namespace: kube-system
+    kubeconfig: "{{ kubeconfig }}"
+    wait: true
+    timeout: 10m
+    values:
+      args:
+        - --kubelet-insecure-tls
+        - --kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+  become: false
+
+# R-02: helm sukses bukan bukti. Yang menentukan adalah APIService-nya Available.
+- name: Tunggu APIService metrics.k8s.io jadi Available
+  kubernetes.core.k8s_info:
+    api_version: apiregistration.k8s.io/v1
+    kind: APIService
+    name: v1beta1.metrics.k8s.io
+    kubeconfig: "{{ kubeconfig }}"
+  become: false
+  register: metrics_api
+  until: >-
+    metrics_api.resources | length > 0 and
+    (metrics_api.resources[0].status.conditions | default([])
+     | selectattr('type', 'equalto', 'Available')
+     | selectattr('status', 'equalto', 'True') | list | length) > 0
+  retries: 30
+  delay: 10
+
+# B1: API tersedia belum berarti angkanya keluar. Yang membuktikan fitur ini
+# hidup adalah metrik yang benar-benar terbaca oleh klien.
+- name: Buktikan metrik node benar-benar keluar
+  ansible.builtin.command: kubectl --kubeconfig {{ kubeconfig }} top nodes --no-headers
+  become: false
+  register: top_nodes
+  changed_when: false
+  retries: 12
+  delay: 10
+  until: top_nodes.rc == 0 and top_nodes.stdout_lines | length > 0
+
+- name: Laporkan metrik yang terbaca
+  ansible.builtin.debug:
+    msg: >-
+      metrics-server hidup, {{ top_nodes.stdout_lines | length }} node melaporkan metrik.
+      HPA sekarang bisa membaca TARGETS; kalau masih <unknown>, masalahnya di
+      resources.requests pod, bukan di sini.

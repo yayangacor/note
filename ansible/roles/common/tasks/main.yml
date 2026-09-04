@@ -1,0 +1,94 @@
+---
+# Persiapan OS yang berlaku untuk SEMUA node cluster.
+# Hostname ditetapkan DI SINI dan tidak boleh diubah sesudah kubeadm init --
+# nama node Kubernetes mengikuti hostname, jadi mengubahnya = node baru.
+
+- name: Set hostname sesuai nama di inventory
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Daftarkan semua node dan VIP di /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE K8S NODES"
+    block: |
+      {% for host in groups['k8s_cluster'] %}
+      {{ hostvars[host]['ansible_host'] }}  {{ host }}
+      {% endfor %}
+      {{ kube_vip }}  kube-vip
+
+- name: Bersihkan repo Helm lama yang sudah dinonaktifkan
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/helm.list
+    - /etc/apt/sources.list.d/helm-stable-debian.list
+    - /etc/apt/keyrings/helm-apt-keyring.asc
+
+- name: Install paket dasar
+  ansible.builtin.apt:
+    name:
+      - curl
+      - gnupg
+      - ca-certificates
+      - apt-transport-https
+      - python3-pip
+      - qemu-guest-agent   # supaya Proxmox bisa melaporkan IP VM
+      - open-iscsi         # prasyarat Longhorn
+      - nfs-common         # prasyarat Longhorn
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Pastikan qemu-guest-agent jalan
+  ansible.builtin.service:
+    name: qemu-guest-agent
+    state: started
+    enabled: true
+  failed_when: false   # tidak ada di bare metal, bukan alasan menggagalkan play
+
+- name: Pastikan iscsid jalan (tanpa ini volume Longhorn menggantung di attaching)
+  ansible.builtin.service:
+    name: iscsid
+    state: started
+    enabled: true
+
+# -- Swap ------------------------------------------------------------------
+- name: Matikan swap sekarang
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb | int > 0
+  changed_when: ansible_swaptotal_mb | int > 0
+
+- name: Nonaktifkan swap permanen di fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\sswap\s+sw\s+.*)$'
+    replace: '# \1'
+
+# -- Kernel ----------------------------------------------------------------
+- name: Modul kernel dimuat saat boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: "0644"
+
+- name: Muat modul kernel sekarang
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [overlay, br_netfilter]
+
+- name: Parameter sysctl Kubernetes
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+    state: present
+    reload: true
+  loop:
+    - { key: net.bridge.bridge-nf-call-iptables, value: "1" }
+    - { key: net.bridge.bridge-nf-call-ip6tables, value: "1" }
+    - { key: net.ipv4.ip_forward, value: "1" }

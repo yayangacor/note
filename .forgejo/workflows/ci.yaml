@@ -1,0 +1,226 @@
+# ==============================================================================
+#  Pipeline CI -- enam tahap sesuai case, berurutan:
+#    1. Vulnerabilities  : GitLeaks + Semgrep + Trivy fs
+#    2. Containerize     : docker build backend + frontend
+#    3. Image Scanning   : Trivy image (KEDUA image, bukan hanya backend)
+#    4. Publish          : push ke private registry
+#    5. IaC Scan         : Checkov terhadap manifest k8s
+#    6. Update Manifests  : commit tag baru ke repo
+#
+#  Build dijalankan lewat SSH ke PC yang punya Docker. Alasannya: runner
+#  container di lab ini tidak selalu punya akses docker.sock yang stabil.
+#  Konsekuensinya SSH key jadi rahasia tambahan dan build bergantung pada satu
+#  PC -- trade-off ini disengaja, bukan kelalaian.
+#
+#  Semua image scanner DIPIN ke versi tetap, bukan `latest`. Alasannya bukan
+#  Kyverno (ia tidak melihat image CI), tapi keterulangan: scanner yang
+#  ikut hanyut ke versi baru bisa tiba-tiba MERAH karena aturan baru, dan
+#  pipeline yang gagal tanpa ada perubahan kode sangat mahal untuk
+#  didiagnosis. Naikkan versinya dengan sengaja, bukan secara diam-diam.
+#
+#  Secret yang harus diisi di Forgejo (Settings > Secrets):
+#    SERVER_HOST, SERVER_USER, SSH_PRIVATE_KEY, GIT_TOKEN,
+#    REGISTRY_USER, REGISTRY_PASS
+#
+#  GIT_TOKEN dipakai DUA sistem dengan satu nilai yang sama ([[D-17]]):
+#    - di sini, untuk mem-push commit tag balik ke repo  -> butuh write
+#    - di ansible vault sebagai `forgejo_repo_token`, dipakai ArgoCD membaca repo
+#  Karena itu scope-nya WAJIB `write:repository`. Kalau token ini diganti,
+#  ganti juga di `ansible/group_vars/all/vault.yml` -- Ansible tidak bisa
+#  membaca Secrets milik Forgejo, jadi tidak ada yang menyinkronkannya otomatis.
+# ==============================================================================
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: 192.168.1.197:5000        # TODO(Q-05)
+  APP_DOMAIN: commx.local.com
+  WORKDIR: /home/prk/Desktop/ComMX-Forgejo
+
+jobs:
+  security-scan:
+    name: 1. Vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # WAJIB, dan bukan basa-basi. Runner kita didaftarkan dengan
+      # `--labels ubuntu-latest:docker://node:20-bookworm`, jadi job ini jalan
+      # DI DALAM container node -- yang tidak punya Docker CLI. Tanpa langkah
+      # ini semua step di bawah mati dengan `docker: command not found`, dan
+      # itu langkah PERTAMA dari job PERTAMA. Lihat [[G-23]] E1 / [[G-25]].
+      # Base image dipertahankan node:* karena actions/checkout membutuhkan
+      # Node -- pernah dicoba diganti docker:cli dan malah `exec: "node": not
+      # found` ([[G-23]] E3).
+      - name: Siapkan Docker CLI
+        run: |
+          command -v docker >/dev/null && exit 0
+          apt-get update -qq && apt-get install -y -qq docker.io
+          docker version --format '{{.Client.Version}}'
+
+      # Kontrol negatif untuk tahap ini: tambahkan dummy secret di branch uji
+      # dan pastikan langkah ini MERAH. Scan yang tidak pernah gagal tidak
+      # membuktikan apa pun.
+      - name: GitLeaks (rahasia yang ter-commit)
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.18.4 \
+            detect --source=/repo --no-git -v
+
+      - name: Semgrep (pola kode berbahaya)
+        run: |
+          docker run --rm -v "$PWD:/src" semgrep/semgrep:1.86.0 \
+            semgrep --config=auto --error /src
+
+      - name: Trivy filesystem (dependency rentan)
+        run: |
+          docker run --rm -v "$PWD:/repo" -v trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:0.55.2 fs --severity HIGH,CRITICAL --exit-code 1 /repo
+
+  build-publish:
+    name: 2-4. Build, scan image, publish
+    needs: security-scan
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.TAG }}
+    steps:
+      - name: Tentukan tag versi
+        id: vars
+        # Tag WAJIB unik dan bukan `latest` -- Kyverno menolak latest (R-03).
+        run: echo "TAG=v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      - name: Build, scan, dan push lewat SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          TAG: ${{ steps.vars.outputs.TAG }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: TAG
+          script: |
+            set -e
+            cd ${{ env.WORKDIR }}
+            git remote set-url origin http://ci-bot:${{ secrets.GIT_TOKEN }}@192.168.1.197:3000/fadmin/ComMX-Forgejo.git
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "${{ secrets.REGISTRY_PASS }}" | docker login ${{ env.REGISTRY }} \
+              -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
+            # -- 2. Containerize -------------------------------------------
+            docker build -t ${{ env.REGISTRY }}/commx-backend:$TAG ./backend
+
+            # Frontend WAJIB menerima build-arg: Next.js membakar NEXT_PUBLIC_*
+            # saat build, jadi tanpa ini bundle klien memakai URL kosong dan
+            # koneksi WSS tidak pernah terbentuk (G-04).
+            docker build \
+              --build-arg NEXT_PUBLIC_SOCKET_URL=wss://${{ env.APP_DOMAIN }} \
+              --build-arg NEXT_PUBLIC_BACKEND_URL=https://${{ env.APP_DOMAIN }}/api \
+              -t ${{ env.REGISTRY }}/commx-frontend:$TAG ./frontend
+
+            # -- 3. Image scanning (KEDUA image) ---------------------------
+            for img in commx-backend commx-frontend; do
+              docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                -v trivy-cache:/root/.cache/trivy \
+                aquasec/trivy:0.55.2 image --severity HIGH,CRITICAL \
+                ${{ env.REGISTRY }}/$img:$TAG
+            done
+
+            # -- 4. Publish -------------------------------------------------
+            docker push ${{ env.REGISTRY }}/commx-backend:$TAG
+            docker push ${{ env.REGISTRY }}/commx-frontend:$TAG
+
+  iac-scan:
+    name: 5. IaC Scan
+    needs: build-publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Lihat alasan lengkapnya di job security-scan. [[G-25]]
+      - name: Siapkan Docker CLI
+        run: |
+          command -v docker >/dev/null && exit 0
+          apt-get update -qq && apt-get install -y -qq docker.io
+          docker version --format '{{.Client.Version}}'
+
+      - name: Checkov terhadap manifest Kubernetes
+        run: |
+          docker run --rm -v "$PWD/k8s:/k8s" bridgecrew/checkov:3.2.257 \
+            -d /k8s --compact --quiet \
+            --skip-path /k8s/config/secret.example.yaml
+
+      # Gerbang [[D-23]]: policy Kyverno + rujukan silang HPA/Service/HTTPRoute,
+      # diperiksa SEBELUM manifest menyentuh cluster. Tanpa ini penolakan
+      # Kyverno baru muncul di ArgoCD sebagai "sync failed" yang menyesatkan
+      # ([[R-03]]).
+      #
+      # Sengaja DUA container, bukan memasang tool di runner: perakit hanya
+      # butuh kustomize, pemeriksa hanya butuh python. Runner tidak perlu punya
+      # keduanya, dan lingkungan runner adalah sumber kegagalan paling sering
+      # di case ini ([[G-23]]).
+      - name: Rakit manifest
+        run: |
+          docker run --rm -v "$PWD:/w" \
+            registry.k8s.io/kustomize/kustomize:v5.4.2 build /w/k8s > build.yaml
+          echo "dokumen terakit: $(grep -c '^kind:' build.yaml)"
+
+      # Skrip ini menguji dirinya sendiri lebih dulu dengan manifest rusak
+      # buatan, dan berhenti kalau tidak menangkapnya -- jadi "lolos" di sini
+      # bukan sekadar ketiadaan error (B3).
+      - name: Gerbang policy + rujukan silang
+        run: |
+          # --root-user-action=ignore: tanpa itu pip menulis peringatan panjang
+          # ke stderr walau sukses, dan di log CI itu terbaca seperti kegagalan.
+          docker run --rm -v "$PWD:/w" -w /w python:3.12-slim \
+            sh -c "pip install --quiet --disable-pip-version-check \
+                     --root-user-action=ignore pyyaml \
+                   && python scripts/validate-manifests.py build.yaml"
+
+  update-manifest:
+    name: 6. Update manifest
+    needs: [build-publish, iac-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Commit tag baru lewat SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          TAG: ${{ needs.build-publish.outputs.tag }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: TAG
+          script: |
+            set -e
+            cd ${{ env.WORKDIR }}/k8s
+
+            # Versi lama memakai `sed s/v0.0.0/.../` terhadap manifest yang
+            # TIDAK memuat literal itu: sed sukses, git commit gagal
+            # "nothing to commit", dan pipeline tetap hijau padahal tag tidak
+            # pernah berubah. `kustomize edit` menyunting satu sumber
+            # kebenaran, dan `git diff --exit-code` di bawah membuktikan
+            # perubahannya benar-benar terjadi.
+            kustomize edit set image commx-backend=${{ env.REGISTRY }}/commx-backend:$TAG
+            kustomize edit set image commx-frontend=${{ env.REGISTRY }}/commx-frontend:$TAG
+
+            cd ${{ env.WORKDIR }}
+            if git diff --exit-code k8s/kustomization.yaml; then
+              echo "GAGAL: kustomization.yaml tidak berubah, tag tidak ter-update."
+              exit 1
+            fi
+
+            git config user.name  "Forgejo Actions CI"
+            git config user.email "ci@forgejo.local"
+            git add k8s/kustomization.yaml
+            git commit -m "chore: bump image ke $TAG [skip ci]"
+            git push origin main
+
+            # Verifikasi commit benar-benar mendarat, bukan sekadar rc 0 (R-02).
+            git log -1 --oneline

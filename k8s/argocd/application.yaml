@@ -1,0 +1,37 @@
+# ==========================================================================
+#  BUKAN SUMBER KEBENARAN. Sejak 2026-09-04 ([[D-16]]) yang meng-apply
+#  Application adalah role Ansible `argocd`, dan repoURL-nya dirakit dari
+#  `ansible/group_vars/all/vars.yml` (cicd_host_ip + forgejo_repo_owner +
+#  forgejo_repo_name). File ini tinggal cadangan untuk jalur manual.
+#
+#  Kalau kamu MENGUBAH nilai di sini, perubahannya TIDAK sampai ke cluster
+#  selama role argocd dijalankan -- role akan menimpanya. Ubah di vars.yml.
+#
+#  Jalur manual (hanya kalau Ansible tidak dipakai):
+#    kubectl apply -f k8s/argocd/application.yaml
+#
+#  TIDAK ikut di-kustomize -- resource ini hidup di namespace argocd.
+# ==========================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: commx
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # TODO(Q-05): sesuaikan kalau host Forgejo berubah.
+    repoURL: http://192.168.1.197:3000/fadmin/ComMX-Forgejo.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    # Sebelumnya `commx` sementara manifest memakai `commx-prod` -- ArgoCD
+    # menyinkronkan ke namespace yang salah dan sync gagal tanpa sebab jelas.
+    namespace: commx-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,127 @@
+# ==========================================================================
+#  Migrasi skema database.
+#
+#  Kenapa Job ini ada: Drizzle TIDAK auto-migrate. Tanpa tabel `users`, semua
+#  pod Running dan sehat, Gateway punya ADDRESS, tapi login gagal -- gejala
+#  yang tidak menunjuk penyebabnya sama sekali. Group A menemukannya di mesin
+#  dan menambalnya dengan CREATE TABLE manual (refs/UPSTREAM-EVIDENCE.md).
+#
+#  Kenapa `psql` dan BUKAN `drizzle-kit migrate`: `drizzle-kit` ada di
+#  devDependencies, sedangkan image backend dibangun dengan
+#  `npm ci --only=production`. Memanggilnya di image itu menghasilkan
+#  `drizzle-kit: not found` -- persis [[G-14]]. Image postgres sudah ditarik
+#  node untuk StatefulSet, jadi tidak menambah dependensi baru.
+#
+#  DDL di bawah diturunkan dari backend/src/db/schema.ts, bukan disalin dari
+#  tim lain:
+#    id       integer().primaryKey().generatedAlwaysAsIdentity()
+#    username varchar({ length: 255 }).notNull()
+#    password varchar({ length: 255 }).notNull()
+#  KALAU schema.ts BERUBAH, FILE INI WAJIB IKUT BERUBAH. Tidak ada yang
+#  memeriksa kecocokannya secara otomatis.
+#
+#  Annotation hook membuatnya jalan sebelum tiap sync ArgoCD dan dihapus lebih
+#  dulu supaya Job lama tidak bentrok. `IF NOT EXISTS` membuatnya aman diulang.
+# ==========================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: commx-db-migrate
+  namespace: commx-prod
+  labels:
+    app: commx
+    owner: group-1
+    app.kubernetes.io/name: commx-db-migrate
+    app.kubernetes.io/part-of: commx
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: commx
+        owner: group-1
+        app.kubernetes.io/name: commx-db-migrate
+        app.kubernetes.io/part-of: commx
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+        - name: migrate
+          # Tag dikunci, bukan `latest` -- Kyverno menolak latest (R-03).
+          #
+          # SENGAJA image yang PERSIS SAMA dengan StatefulSet postgres, bukan
+          # varian alpine. Dua alasan, keduanya terukur 2026-09-04:
+          #   1. uid user `postgres` berbeda antar varian --
+          #      postgres:16-alpine = 70, postgres:16 (debian) = 999.
+          #      `runAsUser: 999` di bawah hanya benar untuk varian debian.
+          #   2. image ini sudah ditarik node untuk StatefulSet, jadi Job tidak
+          #      menambah pull baru -- penting karena registry lab gampang penuh.
+          # Kalau image StatefulSet diganti, ganti yang ini juga.
+          image: postgres:16.4
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: { name: commx-secret, key: POSTGRES_USER }
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: commx-secret, key: POSTGRES_PASSWORD }
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef: { name: commx-secret, key: POSTGRES_DB }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              # Postgres belum tentu siap saat Job lahir. Tunggu, jangan
+              # langsung gagal -- kegagalan di sini terbaca seperti kredensial
+              # salah, padahal cuma soal urutan.
+              echo "menunggu postgres..."
+              until pg_isready -q; do sleep 3; done
+
+              echo "menerapkan skema..."
+              psql -v ON_ERROR_STOP=1 <<'SQL'
+              CREATE TABLE IF NOT EXISTS users (
+                id       INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                username VARCHAR(255) NOT NULL,
+                password VARCHAR(255) NOT NULL
+              );
+              SQL
+
+              # Kontrol positif: jangan percaya "tidak ada error". Buktikan
+              # tabelnya benar-benar ada dan berbentuk seperti yang diminta.
+              echo "memverifikasi..."
+              psql -v ON_ERROR_STOP=1 -tAc \
+                "SELECT column_name FROM information_schema.columns
+                 WHERE table_name='users' ORDER BY ordinal_position;" | tee /tmp/kolom
+
+              grep -qx id       /tmp/kolom
+              grep -qx username /tmp/kolom
+              grep -qx password /tmp/kolom
+
+              echo "OK: tabel users siap dengan ketiga kolomnya."
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
